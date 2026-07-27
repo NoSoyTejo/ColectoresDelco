@@ -1,4 +1,4 @@
-"""Punto de entrada — Proyecto Conector."""
+"""Punto de entrada — Proyecto Colectores."""
 
 from __future__ import annotations
 

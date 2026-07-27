@@ -69,7 +69,7 @@ def test_connect_if_available() -> None:
 
 
 def main() -> int:
-    print("=== Proyecto Conector - hw smoke test ===")
+    print("=== Proyecto Colectores - hw smoke test ===")
     test_protocol()
     test_list_ports()
     test_connect_if_available()

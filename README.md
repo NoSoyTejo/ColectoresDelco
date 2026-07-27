@@ -1,4 +1,4 @@
-# Proyecto Conector
+# Proyecto Colectores
 
 Software de escritorio Windows para interrogar colectores conectados por cable **RS232 → USB** (puerto `COMx`). Reemplazo propio de herramientas tipo remote-com.
 
@@ -12,7 +12,7 @@ Software de escritorio Windows para interrogar colectores conectados por cable *
 ## Instalación
 
 ```powershell
-cd C:\Users\DELCOCHILE\Desktop\ProyectoConector
+cd C:\Users\DELCOCHILE\Desktop\ProyectoColectores
 py -3.14 -m venv venv
 .\venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
@@ -40,7 +40,7 @@ La última configuración (puerto, baud, fin de línea) se guarda en `config/set
 ## Estructura
 
 ```
-ProyectoConector/
+ProyectoColectores/
   config/settings.json   # puerto/baud persistentes
   docs/                  # protocolo y parámetros serial
   src/

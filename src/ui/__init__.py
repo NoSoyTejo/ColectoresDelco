@@ -1,1 +1,1 @@
-"""Interfaz de escritorio del Conector."""
+"""Interfaz de escritorio de Proyecto Colectores."""

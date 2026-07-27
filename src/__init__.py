@@ -1,1 +1,1 @@
-"""Proyecto Conector — cliente serial para colectores RS232/USB."""
+"""Proyecto Colectores — cliente serial para colectores RS232/USB."""

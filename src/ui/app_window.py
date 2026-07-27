@@ -75,7 +75,7 @@ def save_settings(settings: Dict[str, Any]) -> None:
 
 
 class AppWindow(ctk.CTk):
-    """Aplicación de escritorio Proyecto Conector."""
+    """Aplicación de escritorio Proyecto Colectores."""
 
     BAUD_OPTIONS = ["1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200"]
     ENDING_OPTIONS = {
@@ -87,7 +87,7 @@ class AppWindow(ctk.CTk):
 
     def __init__(self) -> None:
         super().__init__()
-        self.title("Proyecto Conector — Colectores Delco")
+        self.title("Proyecto Colectores")
         self.geometry("1100x780")
         self.minsize(960, 680)
 
@@ -124,7 +124,7 @@ class AppWindow(ctk.CTk):
 
         header = ctk.CTkLabel(
             self,
-            text="Proyecto Conector",
+            text="Proyecto Colectores",
             font=ctk.CTkFont(size=22, weight="bold"),
         )
         header.grid(row=0, column=0, padx=16, pady=(16, 4), sticky="w")
