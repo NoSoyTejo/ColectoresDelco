@@ -15,6 +15,18 @@ Texto extraído: [Comados_extracted.txt](Comados_extracted.txt)
 
 Medidores y cabeceras se completan a **12 dígitos** con ceros a la izquierda.
 
+## Conexión por IP (TCP) — experimental
+
+Innovación de la app (no está en `Comados.doc`): mismos comandos ASCII por **socket TCP** en lugar del cable COM.
+
+| Parámetro | Valor |
+|-----------|--------|
+| Host | IP o hostname del colector / convertidor RS232↔Ethernet |
+| Puerto TCP | editable (default **4001**) |
+| Terminador | el mismo que en serial (`\r\n`) |
+
+En la UI: selector **COM | IP**. Requiere que el equipo en esa IP **escuche TCP** y hable el protocolo de texto del colector. Si no hay módulo de red ni gateway, use cable COM.
+
 ## Flujo habitual
 
 1. `QUIT` — detiene la lectura  
@@ -24,43 +36,58 @@ Medidores y cabeceras se completan a **12 dígitos** con ceros a la izquierda.
 
 Si tras `QUIT` responde **lock** → `PWR666666` hasta **unlock**.
 
+La app **espera respuesta** entre cada paso de estas secuencias.
+
 ## Los 13 comandos del manual
 
-| # | Función | Comando / secuencia |
+| # | Función | Secuencia en la app |
 |---|---------|---------------------|
-| 1 | Lectura directa | `R`+medidor(12)+`F031812` (F18 lectura, F12 fecha). Cabecera/display **obsoletos**. |
+| 1 | Lectura directa | `R`+medidor(12)+`F031812` (F18+F12). Cabecera/display obsoletos. |
 | 2 | Refresco forzado | `QUIT` → `SGXF`+medidor → `WAKE` → `ZOOM` |
 | 3 | Borrar medidor | `QUIT` → `E`+medidor → `WAKE` → `ZOOM` |
-| 4 | Agregar medidor | `QUIT` → `A`+medidor[+cabecera] → `WAKE` → `ZOOM`. CP4: `A`+medidor+`00` |
-| 5 | Login | `PWR666666` |
-| 6 | Versión | `VER` → `CCE16…`=v1, `SLD16…`=v2 |
-| 7 | Cantidad medidores | `QUIT` → `O` (IDnum, AMRsw, etc.) |
-| 8 | Reiniciar ciclo K | `k=10100000` (AMRsw debe quedar `10100000`) |
+| 4 | Agregar medidor | `QUIT` → `A`+medidor[+cabecera] → `WAKE` → `ZOOM`. CP4: `A…00` |
+| 5 | Login | `PWR666666` (auto al conectar / ante lock) |
+| 6 | Versión | `VER` (`CCE16`=v1, `SLD16`=v2) |
+| 7 | Cantidad medidores | `QUIT` → `O` (IDnum, AMRsw…) |
+| 8 | Reiniciar ciclo K | `QUIT` → `O` → si AMRsw≠10100000: `k=10100000` → `O` → `QUIT` → `WAKE` → `ZOOM` |
 | 9 | Forzar lecturas | `QUIT` → `WAKE` → `ZOOM` |
-| 10 | Ver horarios | `QUIT` → `i` |
-| 11 | Insertar horarios | Colector **sin** horarios previos. Comando de escritura no detallado en el manual. |
+| 10 | Ver horarios | `QUIT` → `i` (`NO` = sin horarios) |
+| 11 | Insertar horarios | Manual no define el comando. App prueba `I`+HHMM+HHMM (validar en hardware). |
 | 12 | Fecha/hora | `C`+AAMMDDHHMMSS |
 | 13 | Borrar base | `QUIT` (OK) → `DEL` |
 
+### §10 Horarios polling (comando `i`)
+
+Respuesta tipica del manual:
+
+```
+Vendo horarios de pooling
+Total de poolings: 3     ← cantidad de horarios ingresados en el colector
+1 - De 00:00 até 03:59   ← horario polling
+2 - De 04:00 até 15:59
+3 - De 16:00 até 23:59
+```
+
+Las 3 franjas del ejemplo: **00:00–03:59**, **04:00–15:59**, **16:00–23:59**.
+En la UI: Download (`i`) muestra el total + franjas; botón **3 franjas (§10)** carga esa plantilla.
+
+### Notas de comportamiento
+
+- **K responde NO**: suele significar que AMRsw ya es `10100000` (K no necesario).
+- **i responde NO**: colector sin horarios polling (`Total de poolings: 0`).
+- **WAKE / ROUTERERROR**: enviar `QUIT` primero.
+
 ### Interpretación lectura directa
 
-Ejemplo: `000023388410 F0318121606 01 000025710040 090527060924 000090059613 01`
+Ejemplo: `000023388410 F031812 00 000025710040 090527060924`
 
 - Lectura `000025710040` → **2571.40**  
 - Fecha `090527060924` → **2009-05-27 06:09:24**  
 
-### Respuesta comando `i` (horarios)
-
-```
-Vendo horarios de pooling
-Total de poolings: 3
-1 - De 00:00 até 03:59
-2 - De 04:00 até 15:59
-3 - De 16:00 até  2359
-```
-
 ## Código
 
 - `src/protocol.py` — comandos y parsers  
-- `src/ui/app_window.py` — pestaña Comandos  
+- `src/serial_client.py` — transporte COM  
+- `src/tcp_client.py` — transporte TCP (IP)  
+- `src/ui/app_window.py` — pestaña Comandos + selector COM/IP  
 - `src/ui/extra_tabs.py` — Reloj / horarios / medidores / carga masiva  

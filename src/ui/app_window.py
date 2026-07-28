@@ -15,8 +15,10 @@ from app_paths import logs_dir, settings_path
 from command_queue import QueuedCommand, SerialCommandQueue
 from session_log import SessionLog
 from serial_client import SerialClient, describe_ports, list_serial_ports
+from tcp_client import DEFAULT_TCP_PORT, TcpClient
 from ui.extra_tabs import BulkLoadTab, ClockTab, MetersTab
 from protocol import (
+    AMRSW_OK,
     CMD_COUNT_METERS,
     CMD_DELETE_BASE,
     CMD_LOGIN,
@@ -62,6 +64,9 @@ def load_settings() -> Dict[str, Any]:
         "line_ending": "\r\n",
         "last_meter": "",
         "last_header": "",
+        "connection_mode": "com",
+        "tcp_host": "",
+        "tcp_port": DEFAULT_TCP_PORT,
     }
     if not path.exists():
         defaults_copy = dict(defaults)
@@ -108,21 +113,28 @@ class AppWindow(ctk.CTk):
         self._ui_queue: queue.Queue = queue.Queue()
         self._line_ending_label = self._ending_label_for(self.settings.get("line_ending", "\r\n"))
 
-        self.client = SerialClient(
+        self.serial_client = SerialClient(
+            on_data=self._on_serial_data,
+            on_error=self._on_serial_error,
+            on_status=self._on_serial_status,
+        )
+        self.tcp_client = TcpClient(
             on_data=self._on_serial_data,
             on_error=self._on_serial_error,
             on_status=self._on_serial_status,
         )
         self.session_log = SessionLog()
         self.command_queue = SerialCommandQueue(
-            send_command=lambda cmd, wt=0.0: self._send_raw(cmd, write_timeout_s=wt),
+            send_command=lambda cmd, wt=0.0: self._serial_write_only(cmd, write_timeout_s=wt),
             on_log=self._append_log,
-            pause_ms=500,
-            rx_timeout_ms=15000,
+            pause_ms=400,
+            rx_timeout_ms=10000,
             schedule=lambda ms, fn: self.after(ms, fn),
+            on_busy=self._on_queue_busy,
         )
         self._last_error_msg = ""
         self._auto_login_pending = False
+        self._status_idle = "Desconectado — elija COM o IP y pulse Conectar"
 
         self._build_ui()
         self._refresh_ports()
@@ -131,6 +143,16 @@ class AppWindow(ctk.CTk):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(100, self._process_ui_queue)
+
+    @property
+    def client(self):
+        """Transporte activo: SerialClient (COM) o TcpClient (IP)."""
+        if getattr(self, "mode_var", None) is not None and self.mode_var.get() == "IP":
+            return self.tcp_client
+        mode = str(self.settings.get("connection_mode", "com")).lower()
+        if mode == "tcp":
+            return self.tcp_client
+        return self.serial_client
 
     def _ending_label_for(self, ending: str) -> str:
         for label, value in self.ENDING_OPTIONS.items():
@@ -170,24 +192,67 @@ class AppWindow(ctk.CTk):
         # --- Conexión ---
         conn = ctk.CTkFrame(self)
         conn.grid(row=2, column=0, padx=16, pady=8, sticky="ew")
-        for i in range(8):
+        self._conn_frame = conn
+        for i in range(10):
             conn.grid_columnconfigure(i, weight=0)
-        conn.grid_columnconfigure(1, weight=1)
+        conn.grid_columnconfigure(2, weight=1)
 
-        ctk.CTkLabel(conn, text="Puerto COM").grid(row=0, column=0, padx=(12, 4), pady=12, sticky="w")
+        ctk.CTkLabel(conn, text="Modo").grid(row=0, column=0, padx=(12, 4), pady=(12, 4), sticky="w")
+        saved_mode = str(self.settings.get("connection_mode", "com")).lower()
+        self.mode_var = ctk.StringVar(value="IP" if saved_mode == "tcp" else "COM")
+        self.mode_seg = ctk.CTkSegmentedButton(
+            conn,
+            values=["COM", "IP"],
+            variable=self.mode_var,
+            command=self._on_mode_change,
+            width=120,
+        )
+        self.mode_seg.grid(row=0, column=1, padx=4, pady=(12, 4), sticky="w")
+
+        # Fila COM
+        self._com_widgets: list = []
+        self.lbl_port = ctk.CTkLabel(conn, text="Puerto COM")
+        self.lbl_port.grid(row=1, column=0, padx=(12, 4), pady=(4, 12), sticky="w")
         self.port_var = ctk.StringVar(value="")
         self.port_menu = ctk.CTkOptionMenu(conn, variable=self.port_var, values=["(sin puertos)"])
-        self.port_menu.grid(row=0, column=1, padx=4, pady=12, sticky="ew")
-
+        self.port_menu.grid(row=1, column=1, columnspan=2, padx=4, pady=(4, 12), sticky="ew")
         self.btn_refresh = ctk.CTkButton(conn, text="Refrescar", width=90, command=self._refresh_ports)
-        self.btn_refresh.grid(row=0, column=2, padx=4, pady=12)
-
-        ctk.CTkLabel(conn, text="Velocidad").grid(row=0, column=3, padx=(12, 4), pady=12)
+        self.btn_refresh.grid(row=1, column=3, padx=4, pady=(4, 12))
+        self.lbl_baud = ctk.CTkLabel(conn, text="Velocidad")
+        self.lbl_baud.grid(row=1, column=4, padx=(12, 4), pady=(4, 12))
         self.baud_var = ctk.StringVar(value="9600")
         self.baud_menu = ctk.CTkOptionMenu(conn, variable=self.baud_var, values=self.BAUD_OPTIONS, width=100)
-        self.baud_menu.grid(row=0, column=4, padx=4, pady=12)
+        self.baud_menu.grid(row=1, column=5, padx=4, pady=(4, 12))
+        self._com_widgets = [
+            self.lbl_port,
+            self.port_menu,
+            self.btn_refresh,
+            self.lbl_baud,
+            self.baud_menu,
+        ]
 
-        ctk.CTkLabel(conn, text="Fin de línea").grid(row=0, column=5, padx=(12, 4), pady=12)
+        # Fila IP
+        self._ip_widgets: list = []
+        self.lbl_host = ctk.CTkLabel(conn, text="Host / IP")
+        self.lbl_host.grid(row=1, column=0, padx=(12, 4), pady=(4, 12), sticky="w")
+        self.host_var = ctk.StringVar(value=str(self.settings.get("tcp_host") or ""))
+        self.host_entry = ctk.CTkEntry(
+            conn, textvariable=self.host_var, placeholder_text="ej. 192.168.1.50", width=180
+        )
+        self.host_entry.grid(row=1, column=1, columnspan=2, padx=4, pady=(4, 12), sticky="ew")
+        self.lbl_tcp_port = ctk.CTkLabel(conn, text="Puerto TCP")
+        self.lbl_tcp_port.grid(row=1, column=3, padx=(12, 4), pady=(4, 12))
+        self.tcp_port_var = ctk.StringVar(value=str(self.settings.get("tcp_port") or DEFAULT_TCP_PORT))
+        self.tcp_port_entry = ctk.CTkEntry(conn, textvariable=self.tcp_port_var, width=80)
+        self.tcp_port_entry.grid(row=1, column=4, padx=4, pady=(4, 12), sticky="w")
+        self._ip_widgets = [
+            self.lbl_host,
+            self.host_entry,
+            self.lbl_tcp_port,
+            self.tcp_port_entry,
+        ]
+
+        ctk.CTkLabel(conn, text="Fin de línea").grid(row=1, column=6, padx=(12, 4), pady=(4, 12))
         self.ending_var = ctk.StringVar(value=self._line_ending_label)
         self.ending_menu = ctk.CTkOptionMenu(
             conn,
@@ -195,10 +260,10 @@ class AppWindow(ctk.CTk):
             values=list(self.ENDING_OPTIONS.keys()),
             width=140,
         )
-        self.ending_menu.grid(row=0, column=6, padx=4, pady=12)
+        self.ending_menu.grid(row=1, column=7, padx=4, pady=(4, 12))
 
         self.btn_connect = ctk.CTkButton(conn, text="Conectar", width=110, command=self._toggle_connect)
-        self.btn_connect.grid(row=0, column=7, padx=(8, 4), pady=12)
+        self.btn_connect.grid(row=1, column=8, padx=(8, 4), pady=(4, 12))
         self.btn_cancel_seq = ctk.CTkButton(
             conn,
             text="Cancelar secuencia",
@@ -206,12 +271,13 @@ class AppWindow(ctk.CTk):
             fg_color=("gray70", "gray35"),
             command=self._cancel_sequence,
         )
-        self.btn_cancel_seq.grid(row=0, column=8, padx=(4, 12), pady=12)
+        self.btn_cancel_seq.grid(row=1, column=9, padx=(4, 12), pady=(4, 12))
 
-        self.status_var = ctk.StringVar(value="Desconectado — el colector no está en uso")
+        self.status_var = ctk.StringVar(value=self._status_idle)
         ctk.CTkLabel(conn, textvariable=self.status_var, anchor="w").grid(
-            row=1, column=0, columnspan=9, padx=12, pady=(0, 10), sticky="ew"
+            row=2, column=0, columnspan=10, padx=12, pady=(0, 10), sticky="ew"
         )
+        self._apply_mode_visibility()
 
         # --- Pestañas ---
         self.tabview = ctk.CTkTabview(self)
@@ -278,13 +344,14 @@ class AppWindow(ctk.CTk):
         )
         self._cmd_btn(cmds, 14, 0, "VER (versión)", lambda: self._send_one(CMD_VERSION))
         self._cmd_btn(cmds, 14, 1, "O (cant. medidores)", self._do_count_meters)
-        self._cmd_btn(cmds, 15, 0, "K k=10100000", lambda: self._send_one(cmd_restart_reading()))
+        self._cmd_btn(cmds, 15, 0, "K (revisa AMRsw)", self._do_restart_k)
         self._cmd_btn(cmds, 15, 1, "i (horarios) → pestaña Reloj", lambda: self.tabview.set("Reloj"))
 
         note = ctk.CTkLabel(
             cmds,
             text="Según Comados.doc: casi todo usa QUIT → comando → WAKE → ZOOM. "
-            "Cabecera/display están obsoletos. Horarios y reloj: pestaña Reloj.",
+            "Cabecera/display están obsoletos. Horarios y reloj: pestaña Reloj. "
+            "Conexión: cable COM o IP (TCP experimental).",
             wraplength=420,
             justify="left",
             text_color=("gray40", "gray60"),
@@ -343,6 +410,33 @@ class AppWindow(ctk.CTk):
             row=row, column=col, padx=6, pady=4, sticky="ew"
         )
 
+    def _is_tcp_mode(self) -> bool:
+        return self.mode_var.get() == "IP"
+
+    def _on_mode_change(self, _value: str = "") -> None:
+        if self.serial_client.is_connected or self.tcp_client.is_connected:
+            self._append_log("INFO", "Desconecte antes de cambiar COM/IP")
+            # Revert segmented button to the connected mode
+            if self.serial_client.is_connected:
+                self.mode_var.set("COM")
+            else:
+                self.mode_var.set("IP")
+            return
+        self._apply_mode_visibility()
+
+    def _apply_mode_visibility(self) -> None:
+        tcp = self._is_tcp_mode()
+        for w in self._com_widgets:
+            if tcp:
+                w.grid_remove()
+            else:
+                w.grid()
+        for w in self._ip_widgets:
+            if tcp:
+                w.grid()
+            else:
+                w.grid_remove()
+
     def _apply_settings_to_ui(self) -> None:
         baud = str(self.settings.get("baudrate", 9600))
         if baud in self.BAUD_OPTIONS:
@@ -355,6 +449,11 @@ class AppWindow(ctk.CTk):
                 if label.startswith(saved_port):
                     self.port_var.set(label)
                     break
+        self.host_var.set(str(self.settings.get("tcp_host") or ""))
+        self.tcp_port_var.set(str(self.settings.get("tcp_port") or DEFAULT_TCP_PORT))
+        mode = str(self.settings.get("connection_mode", "com")).lower()
+        self.mode_var.set("IP" if mode == "tcp" else "COM")
+        self._apply_mode_visibility()
 
     def _selected_port(self) -> Optional[str]:
         value = self.port_var.get().strip()
@@ -377,11 +476,36 @@ class AppWindow(ctk.CTk):
         self._append_log("INFO", f"Puertos: {', '.join(list_serial_ports()) or 'ninguno'}")
 
     def _toggle_connect(self) -> None:
-        if self.client.is_connected:
+        active = self.client
+        if active.is_connected:
             if self.command_queue.is_busy:
                 self.command_queue.cancel()
-            self.client.disconnect()
+            active.disconnect()
             self._append_log("INFO", "Desconectado")
+            return
+
+        self.settings["line_ending"] = self._current_line_ending()
+
+        if self._is_tcp_mode():
+            host = self.host_var.get().strip()
+            port_txt = self.tcp_port_var.get().strip() or str(DEFAULT_TCP_PORT)
+            try:
+                port = int(port_txt)
+            except ValueError:
+                self._append_log("ERR", f"Puerto TCP inválido: {port_txt}")
+                return
+            try:
+                self.tcp_client.connect(host=host, port=port)
+            except ConnectionError as exc:
+                self._append_log("ERR", str(exc))
+                return
+            self.settings["connection_mode"] = "tcp"
+            self.settings["tcp_host"] = host
+            self.settings["tcp_port"] = port
+            save_settings(self.settings)
+            self._last_error_msg = ""
+            self._append_log("INFO", f"Conectado a {host}:{port} (TCP)")
+            self.after(400, self._send_initial_login)
             return
 
         port = self._selected_port()
@@ -391,7 +515,7 @@ class AppWindow(ctk.CTk):
 
         baud = int(self.baud_var.get())
         try:
-            self.client.connect(
+            self.serial_client.connect(
                 port=port,
                 baudrate=baud,
                 bytesize=int(self.settings.get("bytesize", 8)),
@@ -403,9 +527,9 @@ class AppWindow(ctk.CTk):
             self._append_log("ERR", str(exc))
             return
 
+        self.settings["connection_mode"] = "com"
         self.settings["port"] = port
         self.settings["baudrate"] = baud
-        self.settings["line_ending"] = self._current_line_ending()
         save_settings(self.settings)
         self._last_error_msg = ""
         self._append_log("INFO", f"Conectado a {port} @ {baud} baud")
@@ -424,6 +548,24 @@ class AppWindow(ctk.CTk):
         self._persist_meter_fields()
         return meter
 
+    def _connection_status_text(self) -> str:
+        if self.tcp_client.is_connected:
+            return f"Conectado a {self.tcp_client.host}:{self.tcp_client.port} (TCP)"
+        if self.serial_client.is_connected:
+            port = self.settings.get("port") or "COM"
+            baud = self.settings.get("baudrate") or self.baud_var.get()
+            return f"Conectado a {port} @ {baud} baud"
+        return self._status_idle
+
+    def _on_queue_busy(self, busy: bool) -> None:
+        if busy:
+            cmd = self.command_queue.last_command or "…"
+            self.status_var.set(f"Secuencia en curso ({cmd}) — espere o pulse Cancelar secuencia")
+        elif self.client.is_connected:
+            self.status_var.set(self._connection_status_text())
+        else:
+            self.status_var.set(self._status_idle)
+
     def _cancel_sequence(self) -> None:
         if self.command_queue.is_busy:
             self.command_queue.cancel()
@@ -431,42 +573,46 @@ class AppWindow(ctk.CTk):
         else:
             self._append_log("INFO", "No hay secuencia en curso")
 
+    def _serial_write_only(self, command: str, write_timeout_s: float = 0.0) -> bool:
+        """Solo I/O del transporte activo. NO tocar la UI (se llama desde hilo worker)."""
+        transport = self.client
+        if not transport.is_connected:
+            return False
+        ending = self._current_line_ending()
+        try:
+            timeout = write_timeout_s if write_timeout_s > 0 else 2.0
+            transport.send(format_command(command, ending), write_timeout=timeout)
+            return True
+        except ConnectionError as exc:
+            # Notificar a la UI sin tocar Tk desde este hilo.
+            self._ui_queue.put(("write_fail", str(exc)))
+            return False
+
     def _send_initial_login(self) -> None:
         if not self.client.is_connected or self.command_queue.is_busy:
             return
+        self._append_log("INFO", "Login inicial PWR666666…")
+        self._auto_login_pending = True
         try:
-            self._append_log("INFO", "Login inicial PWR666666…")
-            self._auto_login_pending = True
-            self._send_raw(CMD_LOGIN)
-        except ConnectionError:
+            self.command_queue.start(
+                [QueuedCommand(CMD_LOGIN, wait_rx=True, rx_timeout_ms=5000, write_timeout_s=2.0)],
+                wait_rx=True,
+            )
+        except RuntimeError:
             self._auto_login_pending = False
 
     def _auto_login_on_lock(self) -> None:
         if not self.client.is_connected or self._auto_login_pending or self.command_queue.is_busy:
             return
+        self._append_log("INFO", "Login automático PWR666666…")
+        self._auto_login_pending = True
         try:
-            self._append_log("INFO", "Login automático PWR666666…")
-            self._auto_login_pending = True
-            self._send_raw(CMD_LOGIN)
-        except ConnectionError:
+            self.command_queue.start(
+                [QueuedCommand(CMD_LOGIN, wait_rx=True, rx_timeout_ms=5000, write_timeout_s=2.0)],
+                wait_rx=True,
+            )
+        except RuntimeError:
             self._auto_login_pending = False
-
-    def _send_raw(self, command: str, write_timeout_s: float = 0.0) -> bool:
-        if not self.client.is_connected:
-            self._append_log("ERR", "No hay conexión activa")
-            return False
-        ending = self._current_line_ending()
-        try:
-            timeout = write_timeout_s if write_timeout_s > 0 else None
-            self.client.send(format_command(command, ending), write_timeout=timeout)
-            shown = command.replace("\r", "\\r").replace("\n", "\\n")
-            self._append_log("TX", shown)
-            return True
-        except ConnectionError as exc:
-            self._append_log("ERR", str(exc))
-            self.command_queue.on_send_failed()
-            self._on_connection_lost(str(exc))
-            return False
 
     def _on_connection_lost(self, reason: str) -> None:
         if reason == self._last_error_msg:
@@ -474,24 +620,37 @@ class AppWindow(ctk.CTk):
         self._last_error_msg = reason
         if self.command_queue.is_busy:
             self.command_queue.cancel()
-        self._append_log(
-            "INFO",
-            "Puerto COM perdido o bloqueado. Desenchufe el USB, espere 5 s, "
-            "pulse Refrescar y vuelva a Conectar. Cierre RemoteCOM si está abierto.",
-        )
+        if self._is_tcp_mode():
+            self._append_log(
+                "INFO",
+                "Conexión TCP perdida. Verifique IP/puerto, red y que el colector "
+                "(o convertidor RS232↔Ethernet) escuche TCP. Vuelva a Conectar.",
+            )
+        else:
+            self._append_log(
+                "INFO",
+                "Puerto COM perdido o bloqueado. Desenchufe el USB, espere 5 s, "
+                "pulse Refrescar y vuelva a Conectar. Cierre RemoteCOM si está abierto.",
+            )
 
     def _send_one(self, command: str) -> None:
         if self.command_queue.is_busy:
-            self._append_log("ERR", "Hay una secuencia en curso. Espere o pulse Desconectar.")
+            self._append_log("ERR", "Hay una secuencia en curso. Espere o pulse Cancelar secuencia.")
             return
         self.cmd_var.set(command)
-        self._send_command()
+        try:
+            self.command_queue.start(
+                [QueuedCommand(command, wait_rx=True, rx_timeout_ms=8000, write_timeout_s=2.0)],
+                wait_rx=True,
+            )
+        except RuntimeError as exc:
+            self._append_log("ERR", str(exc))
 
     def _send_many(
         self,
         commands: Iterable[str],
         pause_ms: int = 500,
-        wait_rx: bool = False,
+        wait_rx: bool = True,
         on_done: Optional[Any] = None,
     ) -> None:
         cmds = [c for c in commands if c]
@@ -501,7 +660,7 @@ class AppWindow(ctk.CTk):
             self._append_log("ERR", "No hay conexión activa")
             return
         if self.command_queue.is_busy:
-            self._append_log("ERR", "Hay una secuencia en curso. Espere o pulse Desconectar.")
+            self._append_log("ERR", "Hay una secuencia en curso. Espere o pulse Cancelar secuencia.")
             return
         try:
             self.command_queue.start(cmds, wait_rx=wait_rx, on_done=on_done)
@@ -515,16 +674,31 @@ class AppWindow(ctk.CTk):
         if not self.client.is_connected:
             self._append_log("ERR", "No hay conexión activa")
             return
-        ending = self._current_line_ending()
+        if self.command_queue.is_busy:
+            self._append_log("ERR", "Hay una secuencia en curso. Espere o pulse Cancelar secuencia.")
+            return
         try:
-            raw = format_command(text, ending)
-            self.client.send(raw)
-            shown = text.replace("\r", "\\r").replace("\n", "\\n")
-            self._append_log("TX", shown)
-        except ConnectionError as exc:
+            self.command_queue.start(
+                [QueuedCommand(text, wait_rx=True, rx_timeout_ms=8000, write_timeout_s=2.0)],
+                wait_rx=True,
+            )
+        except RuntimeError as exc:
             self._append_log("ERR", str(exc))
-            self.command_queue.on_send_failed()
-            self._on_connection_lost(str(exc))
+
+    def _maintenance_sequence(self, *mid_commands: str) -> None:
+        """QUIT → comando(s) → WAKE → ZOOM, esperando respuesta en cada paso (Comados.doc)."""
+        from ui.extra_tabs import WAKE_SLOW, ZOOM_CMD
+
+        cmds: list = [
+            QueuedCommand(CMD_QUIT, wait_rx=True, rx_timeout_ms=10000, write_timeout_s=2.0),
+        ]
+        for mid in mid_commands:
+            if mid:
+                cmds.append(
+                    QueuedCommand(mid, wait_rx=True, rx_timeout_ms=10000, write_timeout_s=2.0)
+                )
+        cmds.extend([WAKE_SLOW, ZOOM_CMD])
+        self._send_many(cmds, wait_rx=True)
 
     def _do_direct_read(self) -> None:
         meter = self._require_meter()
@@ -540,7 +714,8 @@ class AppWindow(ctk.CTk):
         if not meter:
             return
         try:
-            self._send_many([CMD_QUIT, cmd_forced_refresh(meter), CMD_WAKE, CMD_ZOOM])
+            self._append_log("INFO", "Refresco (§2): QUIT → SGXF → WAKE → ZOOM")
+            self._maintenance_sequence(cmd_forced_refresh(meter))
         except ValueError as exc:
             self._append_log("ERR", str(exc))
 
@@ -549,7 +724,7 @@ class AppWindow(ctk.CTk):
         if not meter:
             return
         try:
-            self._send_many([CMD_QUIT, cmd_display(meter, on), CMD_WAKE, CMD_ZOOM])
+            self._maintenance_sequence(cmd_display(meter, on))
         except ValueError as exc:
             self._append_log("ERR", str(exc))
 
@@ -562,7 +737,8 @@ class AppWindow(ctk.CTk):
             self._append_log("ERR", "Para agregar con cabecera indique cabecera, o use Agregar CP4")
             return
         try:
-            self._send_many([CMD_QUIT, cmd_add_meter(meter, header), CMD_WAKE, CMD_ZOOM])
+            self._append_log("INFO", "Agregar (§4): QUIT → A… → WAKE → ZOOM")
+            self._maintenance_sequence(cmd_add_meter(meter, header))
         except ValueError as exc:
             self._append_log("ERR", str(exc))
 
@@ -571,7 +747,8 @@ class AppWindow(ctk.CTk):
         if not meter:
             return
         try:
-            self._send_many([CMD_QUIT, cmd_add_meter(meter, individual_tariff=True), CMD_WAKE, CMD_ZOOM])
+            self._append_log("INFO", "Agregar CP4 (§4): QUIT → A…00 → WAKE → ZOOM")
+            self._maintenance_sequence(cmd_add_meter(meter, individual_tariff=True))
         except ValueError as exc:
             self._append_log("ERR", str(exc))
 
@@ -580,7 +757,8 @@ class AppWindow(ctk.CTk):
         if not meter:
             return
         try:
-            self._send_many([CMD_QUIT, cmd_delete_meter(meter), CMD_WAKE, CMD_ZOOM])
+            self._append_log("INFO", "Borrar (§3): QUIT → E… → WAKE → ZOOM")
+            self._maintenance_sequence(cmd_delete_meter(meter))
         except ValueError as exc:
             self._append_log("ERR", str(exc))
 
@@ -591,6 +769,114 @@ class AppWindow(ctk.CTk):
         try:
             self._send_one(cmd_multitariff_read(meter))
         except ValueError as exc:
+            self._append_log("ERR", str(exc))
+
+    def _do_restart_k(self) -> None:
+        """
+        §8 Comados.doc:
+          QUIT → O (ver AMRsw) → si es 10000000 enviar k=10100000 → O → WAKE → ZOOM.
+        Si AMRsw ya es 10100000, K no hace falta (a veces responde NO).
+        """
+        from ui.extra_tabs import WAKE_SLOW, ZOOM_CMD
+
+        if not self.client.is_connected:
+            self._append_log("ERR", "Conecte primero al colector")
+            return
+        if self.command_queue.is_busy:
+            self._append_log("ERR", "Hay una secuencia en curso. Espere o pulse Cancelar secuencia.")
+            return
+
+        self._append_log("INFO", "K (§8): QUIT + O para leer AMRsw…")
+
+        def after_amr_check() -> None:
+            raw = self.command_queue.last_response
+            info = parse_collector_info(raw)
+            amr = info.amrsw if info else None
+            if not amr:
+                import re
+
+                m = re.search(r"AMRsw=(\d+)", raw or "", re.IGNORECASE)
+                amr = m.group(1) if m else None
+
+            if amr == AMRSW_OK:
+                self._append_log(
+                    "INFO",
+                    f"AMRsw={amr} ya es correcto. No hace falta K. "
+                    "Reiniciando lecturas: QUIT → WAKE → ZOOM…",
+                )
+                try:
+                    self.command_queue.start(
+                        [
+                            QueuedCommand(CMD_QUIT, wait_rx=True, rx_timeout_ms=10000, write_timeout_s=2.0),
+                            WAKE_SLOW,
+                            ZOOM_CMD,
+                        ],
+                        wait_rx=True,
+                    )
+                except RuntimeError as exc:
+                    self._append_log("ERR", str(exc))
+                return
+
+            if amr:
+                self._append_log(
+                    "INFO",
+                    f"AMRsw={amr} (ideal={AMRSW_OK}). Enviando k=10100000…",
+                )
+            else:
+                self._append_log(
+                    "INFO",
+                    "No se pudo leer AMRsw. Intentando k=10100000 de todos modos…",
+                )
+
+            def after_k_done() -> None:
+                self._append_log(
+                    "INFO",
+                    "Secuencia K terminada. Verifique AMRsw=10100000 con el boton O.",
+                )
+
+            try:
+                # Manual §8: k= → O → QUIT → WAKE → ZOOM
+                self.command_queue.start(
+                    [
+                        QueuedCommand(
+                            cmd_restart_reading(),
+                            wait_rx=True,
+                            rx_timeout_ms=10000,
+                            write_timeout_s=2.0,
+                        ),
+                        QueuedCommand(
+                            CMD_COUNT_METERS,
+                            multiline_ms=2000,
+                            wait_rx=True,
+                            rx_timeout_ms=12000,
+                            write_timeout_s=2.0,
+                        ),
+                        QueuedCommand(CMD_QUIT, wait_rx=True, rx_timeout_ms=10000, write_timeout_s=2.0),
+                        WAKE_SLOW,
+                        ZOOM_CMD,
+                    ],
+                    wait_rx=True,
+                    on_done=after_k_done,
+                )
+            except RuntimeError as exc:
+                self._append_log("ERR", str(exc))
+
+        try:
+            self.command_queue.start(
+                [
+                    QueuedCommand(CMD_QUIT, wait_rx=True, rx_timeout_ms=10000, write_timeout_s=2.0),
+                    QueuedCommand(
+                        CMD_COUNT_METERS,
+                        multiline_ms=2500,
+                        wait_rx=True,
+                        rx_timeout_ms=15000,
+                        write_timeout_s=2.0,
+                    ),
+                ],
+                wait_rx=True,
+                on_done=after_amr_check,
+            )
+        except RuntimeError as exc:
             self._append_log("ERR", str(exc))
 
     def _do_quit_wake_zoom(self) -> None:
@@ -613,11 +899,25 @@ class AppWindow(ctk.CTk):
         self._send_many([CMD_QUIT, CMD_DELETE_BASE], wait_rx=True)
 
     def _do_quick_diag(self) -> None:
-        """Versión + estado del colector (comandos seguros de consulta)."""
+        """VER + QUIT + O (version y estado AMRsw / IDnum)."""
         if not self.client.is_connected:
             self._append_log("ERR", "Conecte primero al colector")
             return
-        self._send_many([CMD_VERSION, CMD_COUNT_METERS], wait_rx=True)
+        self._append_log("INFO", "Diagnostico: VER → QUIT → O")
+        self._send_many(
+            [
+                QueuedCommand(CMD_VERSION, wait_rx=True, rx_timeout_ms=8000, write_timeout_s=2.0),
+                QueuedCommand(CMD_QUIT, wait_rx=True, rx_timeout_ms=10000, write_timeout_s=2.0),
+                QueuedCommand(
+                    CMD_COUNT_METERS,
+                    multiline_ms=2500,
+                    wait_rx=True,
+                    rx_timeout_ms=15000,
+                    write_timeout_s=2.0,
+                ),
+            ],
+            wait_rx=True,
+        )
 
     def _open_logs_folder(self) -> None:
         import os
@@ -660,19 +960,36 @@ class AppWindow(ctk.CTk):
                         tip = describe_lock_state(text)
                         if tip:
                             self._append_log("INFO", tip)
-                        self._auto_login_on_lock()
+                        # No lanzar otro login si ya estamos enviando/esperando PWR666666.
+                        last = self.command_queue.last_command.strip().upper()
+                        if last != CMD_LOGIN.upper():
+                            self._auto_login_on_lock()
                         continue
                     if is_unlock_response(text):
                         self._auto_login_pending = False
                         tip = describe_lock_state(text)
                         if tip:
                             self._append_log("INFO", tip)
-                        self.command_queue.on_unlock()
+                        # Si el comando en curso era login, UnLock cierra la secuencia.
+                        # Si era otro comando, on_unlock reintenta ese comando (no el login).
+                        last = self.command_queue.last_command.strip().upper()
+                        if last == CMD_LOGIN.upper():
+                            self.command_queue.on_rx(text)
+                        else:
+                            self.command_queue.on_unlock()
                         continue
                     self.command_queue.on_rx(text)
                     tip = describe_status_response(text, self.command_queue.last_command)
                     if tip:
-                        self._append_log("WARN", tip)
+                        last = self.command_queue.last_command.strip().lower()
+                        # i / k= con NO suelen ser informativos, no fallos graves
+                        kind = (
+                            "INFO"
+                            if text.strip().upper() == "NO"
+                            and (last == "i" or last.startswith("k="))
+                            else "WARN"
+                        )
+                        self._append_log(kind, tip)
                     if parse_collector_info(text):
                         self.meters_tab.on_collector_info(text)
                     self.clock_tab.on_rx(text)
@@ -689,12 +1006,17 @@ class AppWindow(ctk.CTk):
                         self._append_log("INFO", " | ".join(parts))
                 elif kind == "error":
                     self._append_log("ERR", str(payload))
+                elif kind == "write_fail":
+                    self._append_log("ERR", str(payload))
+                    self.command_queue.on_send_failed()
+                    self._on_connection_lost(str(payload))
                 elif kind == "status":
                     connected = bool(payload)
                     if not connected:
                         if self.command_queue.is_busy:
                             self.command_queue.cancel()
                         self._last_error_msg = ""
+                        self._auto_login_pending = False
                     self._set_connected_ui(connected)
         except queue.Empty:
             pass
@@ -702,20 +1024,28 @@ class AppWindow(ctk.CTk):
 
     def _set_connected_ui(self, connected: bool) -> None:
         if connected:
-            self.status_var.set("Conectado — canal abierto (recuerde desconectar al terminar)")
+            self.status_var.set(self._connection_status_text())
             self.btn_connect.configure(text="Desconectar")
+            self.mode_seg.configure(state="disabled")
             self.port_menu.configure(state="disabled")
             self.baud_menu.configure(state="disabled")
+            self.host_entry.configure(state="disabled")
+            self.tcp_port_entry.configure(state="disabled")
+            self.ending_menu.configure(state="disabled")
         else:
-            self.status_var.set("Desconectado — enchufe USB y pulse Conectar")
+            self.status_var.set(self._status_idle)
             self.btn_connect.configure(text="Conectar")
+            self.mode_seg.configure(state="normal")
             self.port_menu.configure(state="normal")
             self.baud_menu.configure(state="normal")
+            self.host_entry.configure(state="normal")
+            self.tcp_port_entry.configure(state="normal")
+            self.ending_menu.configure(state="normal")
 
     def _show_help(self) -> None:
         dialog = ctk.CTkToplevel(self)
         dialog.title("Qué hace cada cosa")
-        dialog.geometry("620x580")
+        dialog.geometry("620x620")
         dialog.transient(self)
         dialog.grab_set()
 
@@ -724,6 +1054,9 @@ class AppWindow(ctk.CTk):
         text.insert(
             "1.0",
             "Según Comados.doc (manual de comandos del colector)\n\n"
+            "Conexión: modo COM (cable USB) o IP (TCP experimental).\n"
+            "En IP use host + puerto (default 4001). Mismos comandos ASCII.\n"
+            "Requiere colector/gateway que escuche TCP.\n\n"
             "Flujo habitual: QUIT → comando → WAKE → ZOOM.\n"
             "Si responde lock → Login PWR666666 (unlock).\n\n"
             "§1 Lectura R…F031812 — lectura (F18) + fecha (F12). Cabecera/display obsoletos.\n"
@@ -739,24 +1072,39 @@ class AppWindow(ctk.CTk):
             "§13 DEL — borrar toda la base (cuidado).\n\n"
             "Medidores — T1–T4 (extensión RemoteCOM).\n"
             "Carga masiva — varios A… en lote.\n"
-            "Al terminar: Desconectar y retirar USB.\n",
+            "Al terminar: Desconectar.\n",
         )
         text.configure(state="disabled")
         ctk.CTkButton(dialog, text="Cerrar", width=100, command=dialog.destroy).pack(pady=(0, 12))
 
     def _on_close(self) -> None:
         try:
+            if self.command_queue.is_busy:
+                self.command_queue.cancel()
             self._persist_meter_fields()
-            if self.client.is_connected:
-                self.client.disconnect()
+            if self.serial_client.is_connected or getattr(self.serial_client, "_ser", None) is not None:
+                self.serial_client.disconnect()
+            if self.tcp_client.is_connected or getattr(self.tcp_client, "_sock", None) is not None:
+                self.tcp_client.disconnect()
             self.session_log.close()
+        except Exception:
+            pass
         finally:
-            self.destroy()
+            try:
+                self.destroy()
+            except Exception:
+                pass
 
 
 def run_app() -> None:
     app = AppWindow()
-    app.mainloop()
+    try:
+        app.mainloop()
+    except KeyboardInterrupt:
+        try:
+            app._on_close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

@@ -13,7 +13,12 @@ def main() -> None:
 
     from ui.app_window import run_app
 
-    run_app()
+    try:
+        run_app()
+    except KeyboardInterrupt:
+        # Ctrl+C o cierre forzado desde consola — salida limpia, sin traceback.
+        print("\nAplicación cerrada.")
+        sys.exit(0)
 
 
 if __name__ == "__main__":

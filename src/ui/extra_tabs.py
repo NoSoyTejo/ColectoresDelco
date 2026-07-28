@@ -15,8 +15,11 @@ from polling_schedule import (
     PollingSlot,
     build_upload_commands,
     default_full_day_slot,
+    default_standard_polling_slots,
+    format_polling_table,
     parse_polling_line,
     parse_polling_response,
+    parse_polling_total,
     polling_response_summary,
     slots_to_lines,
 )
@@ -34,6 +37,7 @@ from protocol import (
     cmd_set_clock,
     cmd_set_clock_now,
     format_meter_reading_summary,
+    is_empty_polling_response,
     parse_collector_clock,
     parse_collector_info,
     parse_meter_reading,
@@ -43,13 +47,13 @@ if TYPE_CHECKING:
     from ui.app_window import AppWindow
 
 
-WAKE_SLOW = QueuedCommand(CMD_WAKE, rx_timeout_ms=45000, write_timeout_s=3.0, wait_rx=True)
-ZOOM_CMD = QueuedCommand(CMD_ZOOM, rx_timeout_ms=15000, write_timeout_s=3.0, wait_rx=True)
+WAKE_SLOW = QueuedCommand(CMD_WAKE, rx_timeout_ms=20000, write_timeout_s=2.0, wait_rx=True)
+ZOOM_CMD = QueuedCommand(CMD_ZOOM, rx_timeout_ms=10000, write_timeout_s=2.0, wait_rx=True)
 POLLING_DOWNLOAD = QueuedCommand(
     cmd_download_polling(),
-    multiline_ms=5000,
-    rx_timeout_ms=20000,
-    write_timeout_s=3.0,
+    multiline_ms=2500,
+    rx_timeout_ms=12000,
+    write_timeout_s=2.0,
     wait_rx=True,
 )
 
@@ -117,45 +121,59 @@ class ClockTab(ctk.CTkScrollableFrame):
         poll_box = ctk.CTkFrame(self)
         poll_box.grid(row=1, column=0, padx=8, pady=8, sticky="nsew")
         poll_box.grid_columnconfigure(0, weight=1)
-        poll_box.grid_rowconfigure(2, weight=1)
+        poll_box.grid_rowconfigure(3, weight=1)
 
         ctk.CTkLabel(
-            poll_box, text="§10–§11 Horarios polling (comando i)", font=ctk.CTkFont(weight="bold")
-        ).grid(row=0, column=0, padx=10, pady=(10, 6), sticky="w")
+            poll_box, text="§10 Horarios polling (comando i)", font=ctk.CTkFont(weight="bold")
+        ).grid(row=0, column=0, padx=10, pady=(10, 2), sticky="w")
+        ctk.CTkLabel(
+            poll_box,
+            text="Ejemplo del manual: Total de poolings: 3  =  "
+            "00:00-03:59  |  04:00-15:59  |  16:00-23:59",
+            text_color=("gray40", "gray60"),
+            wraplength=720,
+            justify="left",
+        ).grid(row=1, column=0, padx=10, pady=(0, 4), sticky="w")
 
         add_row = ctk.CTkFrame(poll_box, fg_color="transparent")
-        add_row.grid(row=1, column=0, padx=10, pady=4, sticky="ew")
+        add_row.grid(row=2, column=0, padx=10, pady=4, sticky="ew")
         ctk.CTkLabel(add_row, text="Desde").pack(side="left", padx=(0, 4))
         self.start_var = ctk.StringVar(value="00:00")
         ctk.CTkEntry(add_row, textvariable=self.start_var, width=70).pack(side="left", padx=4)
         ctk.CTkLabel(add_row, text="Hasta").pack(side="left", padx=(8, 4))
-        self.end_var = ctk.StringVar(value="23:59")
+        self.end_var = ctk.StringVar(value="03:59")
         ctk.CTkEntry(add_row, textvariable=self.end_var, width=70).pack(side="left", padx=4)
 
-        self.schedule_box = ctk.CTkTextbox(poll_box, height=140, font=ctk.CTkFont(family="Consolas", size=12))
-        self.schedule_box.grid(row=2, column=0, padx=10, pady=8, sticky="nsew")
+        self.schedule_box = ctk.CTkTextbox(poll_box, height=160, font=ctk.CTkFont(family="Consolas", size=12))
+        self.schedule_box.grid(row=3, column=0, padx=10, pady=8, sticky="nsew")
         self._show_schedule_text(
-            "Pulse Download (§10: QUIT + i) para ver horarios del colector.\n"
-            "§11: para insertar, el colector no debe tener horarios. Use Día completo + Upload."
+            "Pulse Download (i) para leer los horarios del colector (§10).\n"
+            "Respuesta tipica:\n"
+            "  Total de poolings: 3   <- cantidad en el colector\n"
+            "  1 - De 00:00 ate 03:59\n"
+            "  2 - De 04:00 ate 15:59\n"
+            "  3 - De 16:00 ate 23:59\n"
+            "Boton '3 franjas (§10)' carga ese ejemplo para editar/Upload (§11)."
         )
 
         poll_btns = ctk.CTkFrame(poll_box, fg_color="transparent")
-        poll_btns.grid(row=3, column=0, padx=10, pady=(0, 10), sticky="ew")
+        poll_btns.grid(row=4, column=0, padx=10, pady=(0, 10), sticky="ew")
         for text, cmd in (
             ("Add", self._add_slot),
+            ("3 franjas (§10)", self._add_standard_three),
             ("Día completo", self._add_full_day),
             ("Delete", self._delete_slot),
             ("Clear", self._clear_slots),
             ("Download (i)", self._download_schedules),
             ("Upload", self._upload_schedules),
         ):
-            ctk.CTkButton(poll_btns, text=text, width=110, command=cmd).pack(side="left", padx=3)
+            ctk.CTkButton(poll_btns, text=text, width=105, command=cmd).pack(side="left", padx=2)
 
         self.poll_status = ctk.StringVar(
-            value="Download = QUIT + i (§10). Upload requiere colector sin horarios (§11)."
+            value="Download = QUIT + i. Total de poolings = cantidad de horarios en el colector."
         )
-        ctk.CTkLabel(poll_box, textvariable=self.poll_status, text_color=("gray40", "gray60"), wraplength=560).grid(
-            row=4, column=0, padx=10, pady=(0, 10), sticky="w"
+        ctk.CTkLabel(poll_box, textvariable=self.poll_status, text_color=("gray40", "gray60"), wraplength=700).grid(
+            row=5, column=0, padx=10, pady=(0, 10), sticky="w"
         )
 
         # --- 3. Startup & Stop ---
@@ -262,19 +280,34 @@ class ClockTab(ctk.CTkScrollableFrame):
         self.schedule_box.delete("1.0", "end")
         self.schedule_box.insert("1.0", text.rstrip() + "\n")
 
-    def _render_slots(self) -> None:
+    def _render_slots(self, total: Optional[int] = None) -> None:
         if self._slots:
-            self._show_schedule_text("\n".join(s.display() for s in self._slots))
+            self._show_schedule_text(format_polling_table(self._slots, total=total))
         else:
             self._show_schedule_text("(sin horarios en la lista)")
+
+    def _add_standard_three(self) -> None:
+        """Carga las 3 franjas del ejemplo Comados.doc §10."""
+        self._slots = default_standard_polling_slots()
+        self.start_var.set("00:00")
+        self.end_var.set("03:59")
+        self._render_slots(total=3)
+        self.poll_status.set(
+            "Total de poolings: 3 (ejemplo §10) — 00:00-03:59 | 04:00-15:59 | 16:00-23:59"
+        )
+        self.app._append_log(
+            "INFO",
+            "Cargadas 3 franjas tipicas del manual (§10). "
+            "Si el colector esta vacio, puede intentar Upload (§11).",
+        )
 
     def _add_full_day(self) -> None:
         slot = default_full_day_slot()
         self._slots = [slot]
         self.start_var.set("00:00")
         self.end_var.set("23:59")
-        self._render_slots()
-        self.poll_status.set("Horario día completo: 00:00 – 23:59 (pulse Upload para enviarlo)")
+        self._render_slots(total=1)
+        self.poll_status.set("Horario dia completo: 00:00 – 23:59 (pulse Upload para enviarlo)")
 
     def _add_slot(self) -> None:
         try:
@@ -288,8 +321,8 @@ class ClockTab(ctk.CTkScrollableFrame):
             self._slots.append(slot)
             for i, s in enumerate(self._slots, start=1):
                 s.index = i
-            self._render_slots()
-            self.poll_status.set(f"{len(self._slots)} horario(s) en la lista")
+            self._render_slots(total=len(self._slots))
+            self.poll_status.set(f"Total de poolings (lista local): {len(self._slots)}")
         except ValueError as exc:
             self.app._append_log("ERR", str(exc))
 
@@ -299,22 +332,48 @@ class ClockTab(ctk.CTkScrollableFrame):
         self._slots.pop()
         for i, s in enumerate(self._slots, start=1):
             s.index = i
-        self._render_slots()
+        self._render_slots(total=len(self._slots) if self._slots else 0)
 
     def _clear_slots(self) -> None:
         self._slots.clear()
-        self._show_schedule_text("(lista vacía — Download o Día completo)")
-        self.poll_status.set("Lista de horarios vacía")
+        self._show_schedule_text(
+            format_polling_table([], total=0)
+            + "\n\n# Use Download (i) o '3 franjas (§10)'"
+        )
+        self.poll_status.set("Total de poolings: 0 (lista vacia)")
 
     def _apply_download_result(self, raw: str) -> None:
         slots = parse_polling_response(raw)
+        total = parse_polling_total(raw)
+
         if slots:
             self._slots = slots
-            self._render_slots()
-            self.poll_status.set(f"Download OK: {len(slots)} horario(s) del colector")
-            self.app._append_log("INFO", f"Horarios del colector ({len(slots)}):")
+            shown_total = total if total is not None else len(slots)
+            self._render_slots(total=shown_total)
+            self.poll_status.set(
+                f"Download OK — Total de poolings: {shown_total} "
+                f"(cantidad de horarios en el colector)"
+            )
+            self.app._append_log(
+                "INFO",
+                f"Horarios del colector — Total de poolings: {shown_total}",
+            )
             for slot in slots:
                 self.app._append_log("INFO", f"  {slot.display()}")
+            return
+
+        if is_empty_polling_response(raw) or total == 0:
+            self._slots.clear()
+            self._show_schedule_text(
+                format_polling_table([], total=0)
+                + "\n\n# Sin horarios. Use '3 franjas (§10)' o Add, luego Upload (§11)\n"
+                "# (el colector debe estar vacio para insertar)."
+            )
+            self.poll_status.set("Total de poolings: 0 — sin horarios en el colector")
+            self.app._append_log(
+                "INFO",
+                "Download OK: Total de poolings: 0 (colector sin horarios).",
+            )
             return
 
         summary = polling_response_summary(raw)
@@ -323,23 +382,23 @@ class ClockTab(ctk.CTkScrollableFrame):
 
         if raw.strip():
             self.app._append_log("INFO", f"RX polling completo:\n{raw}")
+            header = ""
+            if total is not None:
+                header = f"Total de poolings: {total}\n\n"
             self._show_schedule_text(
-                f"# Respuesta del colector (sin franjas parseadas):\n{raw.strip()}\n\n"
-                "# Si no hay horarios, pulse 'Día completo' y luego Upload."
+                f"# Respuesta del colector:\n{header}{raw.strip()}\n\n"
+                "# Si no se parsearon franjas, use '3 franjas (§10)' como plantilla."
             )
             self._slots.clear()
         else:
             self._slots.clear()
             self._show_schedule_text(
-                "# El colector no respondió al comando i (o no tiene horarios).\n"
-                "# 1) Verifique que haya hecho login (UnLock)\n"
-                "# 2) Pulse Download de nuevo\n"
-                "# 3) O use 'Día completo' (00:00-23:59) + Upload"
+                "# El colector no respondio al comando i.\n"
+                "# 1) Login (UnLock)  2) QUIT (OK)  3) Download de nuevo"
             )
             self.app._append_log(
                 "WARN",
-                "Sin respuesta al comando i. Si el colector no tiene horarios, "
-                "use Día completo + Upload.",
+                "Sin respuesta al comando i. Pulse QUIT, espere OK, y Download otra vez.",
             )
 
     def _download_schedules(self) -> None:
@@ -701,9 +760,18 @@ class BulkLoadTab(ctk.CTkFrame):
             return
 
         commands = build_bulk_add_sequence(valid)
-        self.status_var.set(f"Enviando {len(commands)} comandos…")
+        # Usar timeouts largos en WAKE/ZOOM (Comados.doc: QUIT → A… → WAKE → ZOOM)
+        queued = []
+        for c in commands:
+            if c == CMD_WAKE:
+                queued.append(WAKE_SLOW)
+            elif c == CMD_ZOOM:
+                queued.append(ZOOM_CMD)
+            else:
+                queued.append(QueuedCommand(c, wait_rx=True, rx_timeout_ms=10000, write_timeout_s=2.0))
+        self.status_var.set(f"Enviando {len(queued)} comandos…")
 
         def on_done() -> None:
             self.status_var.set(f"Carga finalizada ({len(valid)} medidores)")
 
-        self.app.command_queue.start(commands, on_done=on_done, wait_rx=False)
+        self.app.command_queue.start(queued, on_done=on_done, wait_rx=True)

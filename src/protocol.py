@@ -486,21 +486,46 @@ def describe_status_response(raw: str, last_command: str = "") -> Optional[str]:
             f"Comando rechazado: {text}. Detenga con QUIT y reintente WAKE + ZOOM."
         )
     if text.upper() == "NO":
+        # Comando i (ver horarios): "NO" = sin franjas, no es error.
+        if cmd_low == "i":
+            return (
+                "Download: el colector no tiene horarios polling (respuesta NO). "
+                "Use 'Día completo' + Upload solo si el colector acepta insertar; "
+                "§11 exige que no haya horarios previos (ya está vacío)."
+            )
+        # Upload IHHMMHHMM
         if cmd_low.startswith("i") and len(cmd) > 1:
             return (
                 f"Upload rechazado (NO) al comando {cmd}. "
                 "El manual (§11) no documenta el formato exacto; "
-                "además el colector debe quedar SIN horarios previos. "
-                "Pruebe Download (i): si ya hay franjas, no se pueden insertar."
+                "el colector debe estar sin horarios previos."
             )
         if cmd_low == "wake":
             return "WAKE rechazado (NO). Envíe QUIT (OK) y luego QUIT → WAKE → ZOOM."
         if cmd_low == "zoom":
             return "ZOOM rechazado (NO). Envíe QUIT y luego QUIT → WAKE → ZOOM."
+        if cmd_low.startswith("k="):
+            return (
+                "K respondio NO: a menudo significa que AMRsw ya esta en 10100000 "
+                "(K no era necesario), o que el colector no estaba en QUIT. "
+                "Use el boton K: primero lee AMRsw con O y solo envia k= si hace falta."
+            )
         if cmd:
             return f"Comando {cmd!r} rechazado (NO). Envíe QUIT y reintente."
         return "Comando rechazado (NO). Envíe QUIT y reintente."
     return None
+
+
+def is_empty_polling_response(raw: str) -> bool:
+    """True si la respuesta del comando i indica que no hay horarios."""
+    text = raw.strip()
+    if not text:
+        return False
+    if text.upper() == "NO":
+        return True
+    if re.search(r"Total de pool(?:ing|ings)?s?:\s*0\b", text, re.IGNORECASE):
+        return True
+    return False
 
 
 def is_lock_response(raw: str) -> bool:

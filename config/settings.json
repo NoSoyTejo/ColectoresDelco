@@ -7,5 +7,8 @@
   "timeout": 1.0,
   "line_ending": "\r\n",
   "last_meter": "",
-  "last_header": ""
+  "last_header": "",
+  "connection_mode": "com",
+  "tcp_host": "",
+  "tcp_port": 4001
 }

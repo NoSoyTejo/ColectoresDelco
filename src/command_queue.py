@@ -10,6 +10,7 @@ from typing import Callable, List, Optional, Union
 OnLog = Callable[[str, str], None]
 OnStep = Callable[[str, str], None]
 OnDone = Callable[[], None]
+OnBusy = Callable[[bool], None]
 
 CommandInput = Union[str, "QueuedCommand"]
 
@@ -30,12 +31,14 @@ class SerialCommandQueue:
         self,
         send_command: Callable[..., bool],
         on_log: OnLog,
-        pause_ms: int = 500,
-        rx_timeout_ms: int = 12000,
+        pause_ms: int = 400,
+        rx_timeout_ms: int = 10000,
         schedule: Optional[Callable[[int, Callable[[], None]], None]] = None,
+        on_busy: Optional[OnBusy] = None,
     ) -> None:
         self._send = send_command
         self._on_log = on_log
+        self._on_busy = on_busy
         self._pause_ms = pause_ms
         self._rx_timeout_ms = rx_timeout_ms
         self._schedule = schedule or (lambda _ms, fn: fn())
@@ -52,6 +55,7 @@ class SerialCommandQueue:
         self._rx_lines: List[str] = []
         self._active_rx_timeout_ms = rx_timeout_ms
         self._send_gen = 0
+        self._pending_wait_rx = False
 
     @property
     def is_busy(self) -> bool:
@@ -64,6 +68,14 @@ class SerialCommandQueue:
     @property
     def last_response(self) -> str:
         return self._last_rx
+
+    def _set_busy(self, value: bool) -> None:
+        self._busy = value
+        if self._on_busy:
+            try:
+                self._on_busy(value)
+            except Exception:
+                pass
 
     @staticmethod
     def _normalize(commands: List[CommandInput]) -> List[QueuedCommand]:
@@ -90,35 +102,49 @@ class SerialCommandQueue:
         self._wait_rx_default = wait_rx
         self._on_step = on_step
         self._on_done = on_done
-        self._busy = bool(self._items)
         self._last_rx = ""
         self._last_cmd = ""
         self._multiline_ms = 0
         self._rx_lines = []
         self._waiting_rx = False
         self._active_rx_timeout_ms = self._rx_timeout_ms
-        if self._busy:
+        if self._items:
+            self._set_busy(True)
             self._on_log("INFO", f"Secuencia iniciada ({len(self._items)} comandos)")
             self._send_next()
         elif on_done:
             on_done()
 
     def cancel(self) -> None:
+        was_busy = self._busy
         self._rx_timer_gen += 1
         self._send_gen += 1
         self._items.clear()
-        self._busy = False
         self._waiting_rx = False
         self._multiline_ms = 0
         self._rx_lines = []
         self._active_rx_timeout_ms = self._rx_timeout_ms
-        self._on_log("INFO", "Secuencia cancelada")
+        if was_busy:
+            self._set_busy(False)
+            self._on_log("INFO", "Secuencia cancelada")
 
     def on_rx(self, text: str) -> None:
         if not self._busy or not self._waiting_rx:
             return
         line = text.strip()
         if not line or self._should_ignore_rx(self._last_cmd, line):
+            return
+
+        # Download i: "NO" = sin horarios → cerrar ya (no esperar multilinea).
+        if self._last_cmd.strip().lower() == "i" and line.upper() == "NO":
+            self._rx_timer_gen += 1
+            self._last_rx = line
+            if self._on_step:
+                self._on_step(self._last_cmd, self._last_rx)
+            self._waiting_rx = False
+            self._multiline_ms = 0
+            self._rx_lines = []
+            self._schedule(self._pause_ms, self._send_next)
             return
 
         if self._multiline_ms > 0:
@@ -153,8 +179,12 @@ class SerialCommandQueue:
         self._schedule(self._pause_ms, self._send_next)
 
     def on_unlock(self) -> None:
-        """Tras login OK, reintenta el último comando si aún esperaba respuesta."""
+        """Tras unlock: si el comando pendiente era login, lo da por OK; si no, reintenta el comando."""
         if not self._busy or not self._last_cmd or not self._waiting_rx:
+            return
+        # Login exitoso: UnLock es la respuesta esperada, no hay que reenviar PWR666666.
+        if self._last_cmd.strip().upper() == "PWR666666":
+            self.on_rx("UnLock")
             return
         self._on_log("INFO", f"Reintentando {self._last_cmd} tras unlock…")
         self._rx_timer_gen += 1
@@ -169,11 +199,11 @@ class SerialCommandQueue:
         self._rx_timer_gen += 1
         self._send_gen += 1
         self._items.clear()
-        self._busy = False
         self._waiting_rx = False
         self._multiline_ms = 0
         self._rx_lines = []
         self._active_rx_timeout_ms = self._rx_timeout_ms
+        self._set_busy(False)
         self._on_log("WARN", "Secuencia interrumpida por error de comunicación")
 
     def _arm_rx_timeout(self) -> None:
@@ -206,7 +236,6 @@ class SerialCommandQueue:
         self._active_rx_timeout_ms = item.rx_timeout_ms or self._rx_timeout_ms
         self._rx_lines = []
         wait = self._wait_rx_default if item.wait_rx is None else item.wait_rx
-        # Guardar si este comando espera RX (se aplica tras el envío OK).
         self._pending_wait_rx = wait
         write_to = item.write_timeout_s if item.write_timeout_s > 0 else 3.0
         self._dispatch_send(item.text, write_to, after_retry=False)
@@ -219,21 +248,25 @@ class SerialCommandQueue:
                 ok = bool(self._send(text, write_timeout_s))
             except Exception:
                 ok = False
-            self._schedule(0, lambda: self._after_send(gen, ok, after_retry=after_retry))
+            # Volver al hilo de UI vía schedule (Tk after).
+            self._schedule(0, lambda: self._after_send(gen, ok, text, after_retry=after_retry))
 
         threading.Thread(target=worker, name="SerialSend", daemon=True).start()
 
-    def _after_send(self, gen: int, ok: bool, *, after_retry: bool) -> None:
+    def _after_send(self, gen: int, ok: bool, text: str, *, after_retry: bool) -> None:
         if gen != self._send_gen or not self._busy:
             return
         if not ok:
             self.on_send_failed()
             return
+        # TX log solo en hilo UI (nunca desde el worker).
+        shown = text.replace("\r", "\\r").replace("\n", "\\n")
+        self._on_log("TX", shown)
         if after_retry:
             self._waiting_rx = True
             self._arm_rx_timeout()
             return
-        wait = getattr(self, "_pending_wait_rx", self._wait_rx_default)
+        wait = self._pending_wait_rx
         if wait:
             self._waiting_rx = True
             self._arm_rx_timeout()
@@ -243,10 +276,10 @@ class SerialCommandQueue:
 
     def _finish(self) -> None:
         self._rx_timer_gen += 1
-        self._busy = False
         self._waiting_rx = False
         self._multiline_ms = 0
         self._rx_lines = []
+        self._set_busy(False)
         self._on_log("INFO", "Secuencia finalizada")
         if self._on_done:
             self._on_done()

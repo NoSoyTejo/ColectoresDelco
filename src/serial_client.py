@@ -96,7 +96,7 @@ class SerialClient:
                 parity=parity_map.get(parity.upper(), serial.PARITY_NONE),
                 stopbits=stop_map.get(stopbits, serial.STOPBITS_ONE),
                 timeout=timeout,
-                write_timeout=5.0,
+                write_timeout=2.5,
             )
         except serial.SerialException as exc:
             self._ser = None
@@ -118,23 +118,30 @@ class SerialClient:
 
     def disconnect(self) -> None:
         self._stop_event.set()
-        thread = self._reader_thread
-        if thread and thread.is_alive():
-            thread.join(timeout=1.5)
-        self._reader_thread = None
+        self._link_lost = True
 
-        if self._ser is not None:
-            try:
-                if self._ser.is_open:
-                    self._ser.close()
-            except (serial.SerialException, OSError):
-                pass
+        # Esperar a que termine un write en curso (máx. ~write_timeout) y cerrar.
+        with self._write_lock:
+            ser = self._ser
             self._ser = None
+            if ser is not None:
+                try:
+                    if ser.is_open:
+                        ser.close()
+                except (serial.SerialException, OSError, KeyboardInterrupt):
+                    pass
 
-        was_connected = self._ser is not None
+        thread = self._reader_thread
+        self._reader_thread = None
+        if thread and thread.is_alive():
+            thread.join(timeout=0.4)
+
         self._link_lost = False
-        if self._on_status and was_connected:
-            self._on_status(False)
+        if self._on_status:
+            try:
+                self._on_status(False)
+            except Exception:
+                pass
 
     def _notify_link_lost(self, reason: str) -> None:
         if self._link_lost:
@@ -159,13 +166,13 @@ class SerialClient:
             ser = self._ser
             if ser is None or not ser.is_open:
                 raise ConnectionError("No hay conexión serial activa.")
-            # Capar timeout de escritura: no debe congelar la UI más de unos segundos.
-            effective = 3.0 if write_timeout is None else min(float(write_timeout), 5.0)
+            # Capar timeout: el worker no debe bloquearse más de ~2.5 s.
+            effective = 2.0 if write_timeout is None else min(float(write_timeout), 2.5)
             old_timeout = ser.write_timeout
             ser.write_timeout = effective
             try:
+                # No usar flush(): en algunos drivers USB congela varios segundos.
                 ser.write(data)
-                ser.flush()
             except serial.SerialException as exc:
                 msg = f"Error al escribir: {exc}"
                 self._notify_link_lost(msg)
@@ -200,7 +207,6 @@ class SerialClient:
                 break
 
             if not chunk:
-                # Emitir buffer incompleto tras ~0.4 s sin datos (respuestas sin \n final).
                 idle_empty += 1
                 if buffer and idle_empty >= 2:
                     self._emit_data(bytes(buffer))
@@ -211,7 +217,6 @@ class SerialClient:
             idle_empty = 0
             buffer.extend(chunk)
             while True:
-                # Preferir líneas completas; si no hay salto, emitir por trozos grandes.
                 for sep in (b"\r\n", b"\n", b"\r"):
                     idx = buffer.find(sep)
                     if idx != -1:
@@ -226,7 +231,6 @@ class SerialClient:
                         self._emit_data(line)
                     break
 
-        # Vaciar resto del buffer al salir
         if buffer:
             self._emit_data(bytes(buffer))
             buffer.clear()
