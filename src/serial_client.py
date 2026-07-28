@@ -46,10 +46,15 @@ class SerialClient:
         self._reader_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._write_lock = threading.Lock()
+        self._link_lost = False
 
     @property
     def is_connected(self) -> bool:
-        return self._ser is not None and self._ser.is_open
+        return (
+            self._ser is not None
+            and self._ser.is_open
+            and not self._link_lost
+        )
 
     def connect(
         self,
@@ -83,6 +88,7 @@ class SerialClient:
         }
 
         try:
+            self._link_lost = False
             self._ser = serial.Serial(
                 port=port,
                 baudrate=baudrate,
@@ -90,7 +96,7 @@ class SerialClient:
                 parity=parity_map.get(parity.upper(), serial.PARITY_NONE),
                 stopbits=stop_map.get(stopbits, serial.STOPBITS_ONE),
                 timeout=timeout,
-                write_timeout=2.0,
+                write_timeout=5.0,
             )
         except serial.SerialException as exc:
             self._ser = None
@@ -121,25 +127,59 @@ class SerialClient:
             try:
                 if self._ser.is_open:
                     self._ser.close()
-            except serial.SerialException:
+            except (serial.SerialException, OSError):
                 pass
             self._ser = None
 
+        was_connected = self._ser is not None
+        self._link_lost = False
+        if self._on_status and was_connected:
+            self._on_status(False)
+
+    def _notify_link_lost(self, reason: str) -> None:
+        if self._link_lost:
+            return
+        self._link_lost = True
+        self._stop_event.set()
+        ser = self._ser
+        self._ser = None
+        if ser is not None:
+            try:
+                if ser.is_open:
+                    ser.close()
+            except (serial.SerialException, OSError, KeyboardInterrupt):
+                pass
         if self._on_status:
             self._on_status(False)
 
-    def send(self, data: bytes) -> None:
+    def send(self, data: bytes, write_timeout: Optional[float] = None) -> None:
         if not self.is_connected or self._ser is None:
             raise ConnectionError("No hay conexión serial activa.")
         with self._write_lock:
+            ser = self._ser
+            if ser is None or not ser.is_open:
+                raise ConnectionError("No hay conexión serial activa.")
+            # Capar timeout de escritura: no debe congelar la UI más de unos segundos.
+            effective = 3.0 if write_timeout is None else min(float(write_timeout), 5.0)
+            old_timeout = ser.write_timeout
+            ser.write_timeout = effective
             try:
-                self._ser.write(data)
-                self._ser.flush()
+                ser.write(data)
+                ser.flush()
             except serial.SerialException as exc:
                 msg = f"Error al escribir: {exc}"
-                if self._on_error:
-                    self._on_error(msg)
+                self._notify_link_lost(msg)
                 raise ConnectionError(msg) from exc
+            except OSError as exc:
+                msg = f"Error al escribir: {exc}"
+                self._notify_link_lost(msg)
+                raise ConnectionError(msg) from exc
+            finally:
+                try:
+                    if self._ser is not None and self._ser.is_open:
+                        self._ser.write_timeout = old_timeout
+                except (serial.SerialException, OSError, AttributeError):
+                    pass
 
     def send_text(self, text: str, line_ending: str = "\r\n") -> None:
         payload = text.rstrip("\r\n") + line_ending
@@ -147,20 +187,28 @@ class SerialClient:
 
     def _read_loop(self) -> None:
         buffer = bytearray()
+        idle_empty = 0
         while not self._stop_event.is_set():
             ser = self._ser
             if ser is None or not ser.is_open:
                 break
             try:
                 chunk = ser.read(256)
-            except serial.SerialException as exc:
-                if not self._stop_event.is_set() and self._on_error:
-                    self._on_error(f"Error de lectura: {exc}")
+            except (serial.SerialException, OSError) as exc:
+                if not self._stop_event.is_set():
+                    self._notify_link_lost(f"Error de lectura: {exc}")
                 break
 
             if not chunk:
+                # Emitir buffer incompleto tras ~0.4 s sin datos (respuestas sin \n final).
+                idle_empty += 1
+                if buffer and idle_empty >= 2:
+                    self._emit_data(bytes(buffer))
+                    buffer.clear()
+                    idle_empty = 0
                 continue
 
+            idle_empty = 0
             buffer.extend(chunk)
             while True:
                 # Preferir líneas completas; si no hay salto, emitir por trozos grandes.
@@ -183,15 +231,8 @@ class SerialClient:
             self._emit_data(bytes(buffer))
             buffer.clear()
 
-        if self._on_status and not self._stop_event.is_set():
-            # Desconexión inesperada
-            try:
-                if self._ser and self._ser.is_open:
-                    self._ser.close()
-            except serial.SerialException:
-                pass
-            self._ser = None
-            self._on_status(False)
+        if self._on_status and not self._stop_event.is_set() and not self._link_lost:
+            self._notify_link_lost("Conexión serial interrumpida")
 
     def _emit_data(self, raw: bytes) -> None:
         if not self._on_data:

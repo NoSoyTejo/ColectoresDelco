@@ -1,4 +1,4 @@
-"""Comandos del colector según docs/ComandosColectores.doc."""
+"""Comandos del colector según docs/Comados.doc."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import re
 
 DEFAULT_LINE_ENDING = "\r\n"
 
-# Secuencia habitual tras detener el colector (docs págs. 3-9).
+# Flujo documentado: QUIT → comando → WAKE → ZOOM
 CMD_QUIT = "QUIT"
 CMD_WAKE = "WAKE"
 CMD_ZOOM = "ZOOM"
@@ -29,6 +29,15 @@ CMD_K_START_READING = "k=10100000"
 AMRSW_OK = "10100000"
 AMRSW_BAD = "10000000"
 
+# Lectura directa (Comados.doc §1): F18 lectura + F12 fecha. Cabecera/display obsoletos.
+READ_FLAGS_BASIC = "1812"
+READ_FLAGS_LEGACY_FULL = "18121606"  # ejemplo antiguo del manual
+
+# Flags lectura multi-tarifa (RemoteCOM / Leitura Massiva — no en Comados.doc)
+# F18=T1, F20=T2, F21=T3, F22=T4, F19=Total, F12=Fecha
+READ_FLAGS_MULTITARIFF = "182021221912"
+READ_FLAGS_MULTITARIFF_WITH_HEADER = "18202122191216"
+
 
 def format_command(command: str, line_ending: str = DEFAULT_LINE_ENDING) -> bytes:
     """Prepara un comando de texto para enviar por el puerto serial."""
@@ -45,11 +54,6 @@ def pad_meter_id(meter_id: str) -> str:
         raise ValueError("El medidor no puede tener más de 12 dígitos.")
     return digits.zfill(12)
 
-
-# Flags lectura multi-tarifa (RemoteCOM / Leitura Massiva)
-# F18=T1, F20=T2, F21=T3, F22=T4, F19=Total, F12=Fecha
-READ_FLAGS_MULTITARIFF = "182021221912"
-READ_FLAGS_MULTITARIFF_WITH_HEADER = "18202122191216"
 
 FLAG_LABELS = {
     "18": "T1",
@@ -103,6 +107,15 @@ def cmd_read_by_index(index: int, flags: str = READ_FLAGS_MULTITARIFF) -> str:
     return f"R{index:04d}F03{flags}"
 
 
+def cmd_read_collector_clock() -> str:
+    """RemoteCOM usa R0000F0312: fecha/hora de la última lectura del medidor índice 0 (flag F12)."""
+    return cmd_read_by_index(0, "12")
+
+
+def cmd_download_polling() -> str:
+    return CMD_POLLING_SCHEDULE
+
+
 def cmd_multitariff_read(meter_id: str, flags: str = READ_FLAGS_MULTITARIFF) -> str:
     """Lectura directa con T1-T4: R + medidor(12) + F03 + flags."""
     return f"R{pad_meter_id(meter_id)}F03{flags}"
@@ -120,16 +133,14 @@ def cmd_direct_read(
     *,
     with_reading: bool = True,
     with_datetime: bool = True,
-    with_header: bool = True,
-    with_display_status: bool = True,
+    with_header: bool = False,
+    with_display_status: bool = False,
 ) -> str:
     """
-    Lectura directa: R + medidor(12) + F03 + flags.
+    Lectura directa (Comados.doc §1): R + medidor(12) + F03 + flags.
 
-    Flags documentados:
-      F18 lectura, F12 fecha/hora, F16 cabecera, F06 status display.
-    En la práctica el bloque se arma como F03 + dígitos de flags, p.ej.:
-      R000023388410F0318121606
+    Flags vigentes: F18 lectura, F12 fecha/hora.
+    Cabecera (F16) y display (F06) están marcados como obsoletos en el manual.
     """
     meter = pad_meter_id(meter_id)
     flags = ""
@@ -282,6 +293,21 @@ def parse_datetime_raw(raw12: str) -> str:
     return f"20{yy}-{mo}-{dd} {hh}:{mi}:{ss}"
 
 
+def parse_collector_clock(raw: str) -> Optional[str]:
+    """Extrae fecha/hora de una respuesta con flag F12."""
+    reading = parse_meter_reading(raw)
+    if reading and reading.datetime_text:
+        return reading.datetime_text
+    parts = raw.strip().split()
+    for part in parts:
+        digits = "".join(ch for ch in part if ch.isdigit())
+        if len(digits) == 12:
+            text = parse_datetime_raw(digits)
+            if "-" in text:
+                return text
+    return None
+
+
 def parse_collector_info(raw: str) -> Optional[CollectorInfo]:
     """Parsea respuesta del comando O (IDnum, AMRsw…)."""
     text = raw.strip()
@@ -373,18 +399,36 @@ def format_meter_reading_summary(reading: MeterReading) -> str:
 
 def parse_direct_read_response(raw: str) -> Optional[DirectReadResult]:
     """
-    Ejemplo documentado:
+    Ejemplo documentado (legacy con cabecera/display):
       000023388410 F0318121606 01 000025710040 090527060924 000090059613 01
+
+    Formato vigente (§1, solo F18+F12) vía parse_meter_reading:
+      000023388410 F031812 00 000025710040 090527060924
     """
+    meter_reading = parse_meter_reading(raw)
+    if meter_reading and (meter_reading.t1 is not None or meter_reading.datetime_text):
+        return DirectReadResult(
+            meter_id=meter_reading.meter_id,
+            flags=meter_reading.flags,
+            unknown=meter_reading.status,
+            reading_raw="",
+            reading_value=meter_reading.t1,
+            datetime_raw=meter_reading.datetime_raw,
+            datetime_text=meter_reading.datetime_text,
+            header=meter_reading.header or "",
+            display_on=meter_reading.display_on,
+            raw=raw.strip(),
+        )
+
     parts = raw.strip().split()
-    if len(parts) < 6:
+    if len(parts) < 5:
         return None
     meter = parts[0]
     flags = parts[1]
     unknown = parts[2]
     reading_raw = parts[3]
     datetime_raw = parts[4]
-    header = parts[5]
+    header = parts[5] if len(parts) > 5 else ""
     display_flag = parts[6] if len(parts) > 6 else ""
     display_on: Optional[bool]
     if display_flag == "01":
@@ -414,11 +458,63 @@ def parse_response(raw: str) -> Optional[str]:
 
 def describe_lock_state(raw: str) -> Optional[str]:
     low = raw.strip().lower()
-    if "lock" in low and "unlock" not in low:
+    if is_lock_response(raw):
         return "Colector bloqueado: enviar login PWR666666"
-    if "unlock" in low:
+    if is_unlock_response(raw):
         return "Colector desbloqueado (login OK)"
     return None
+
+
+def describe_status_response(raw: str, last_command: str = "") -> Optional[str]:
+    """Explica respuestas de estado/error del colector (WAKE, ZOOM, Upload, etc.)."""
+    text = raw.strip()
+    if not text:
+        return None
+    low = text.lower().replace(" ", "")
+    cmd = last_command.strip()
+    cmd_low = cmd.lower()
+
+    if text.upper() == "OK":
+        return None
+    if "routererror" in low or "lasterror_router" in low:
+        return (
+            "WAKE rechazado (ROUTERERROR). Use QUIT, espere OK, "
+            "luego QUIT → WAKE → ZOOM. Si persiste, reinicie USB."
+        )
+    if low.startswith("no") and ("error" in low or "last" in low):
+        return (
+            f"Comando rechazado: {text}. Detenga con QUIT y reintente WAKE + ZOOM."
+        )
+    if text.upper() == "NO":
+        if cmd_low.startswith("i") and len(cmd) > 1:
+            return (
+                f"Upload rechazado (NO) al comando {cmd}. "
+                "El manual (§11) no documenta el formato exacto; "
+                "además el colector debe quedar SIN horarios previos. "
+                "Pruebe Download (i): si ya hay franjas, no se pueden insertar."
+            )
+        if cmd_low == "wake":
+            return "WAKE rechazado (NO). Envíe QUIT (OK) y luego QUIT → WAKE → ZOOM."
+        if cmd_low == "zoom":
+            return "ZOOM rechazado (NO). Envíe QUIT y luego QUIT → WAKE → ZOOM."
+        if cmd:
+            return f"Comando {cmd!r} rechazado (NO). Envíe QUIT y reintente."
+        return "Comando rechazado (NO). Envíe QUIT y reintente."
+    return None
+
+
+def is_lock_response(raw: str) -> bool:
+    low = raw.strip().lower()
+    return low == "lock" or ("lock" in low and "unlock" not in low and len(low) <= 12)
+
+
+def is_unlock_response(raw: str) -> bool:
+    return "unlock" in raw.strip().lower()
+
+
+def is_clock_only_reading(reading: MeterReading) -> bool:
+    """True si la respuesta solo trae flag 12 (fecha/hora), sin tarifas."""
+    return _flag_digits(reading.flags) == ["12"]
 
 
 def sequence_after_maintenance() -> Tuple[str, str]:

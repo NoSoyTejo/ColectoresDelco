@@ -1,83 +1,66 @@
-# Protocolo del colector — según `ComandosColectores.doc`
+# Protocolo del colector — según `Comados.doc`
 
-Fuente oficial: [ComandosColectores.doc](ComandosColectores.doc)  
-Texto extraído: [ComandosColectores.txt](ComandosColectores.txt)
+Fuente oficial: [Comados.doc](Comados.doc)  
+Texto extraído: [Comados_extracted.txt](Comados_extracted.txt)
 
-## Parámetros serial (defaults MVP)
+## Parámetros serial
 
-| Parámetro | Valor por defecto | Notas |
-|-----------|-------------------|--------|
-| Baud rate | 9600 | Configurable en la UI |
-| Data bits | 8 | |
-| Parity | None (`N`) | |
-| Stop bits | 1 | |
-| Terminador | `\r\n` | Probar `\r` si no responde |
-| Encoding | ASCII | |
+| Parámetro | Valor |
+|-----------|--------|
+| Baud rate | 9600 |
+| Data bits | 8 |
+| Parity | None (`N`) |
+| Stop bits | 1 |
+| Terminador | `\r\n` (probar `\r` si no responde) |
 
-Medidores y cabeceras se completan siempre a **12 dígitos** con ceros a la izquierda.
+Medidores y cabeceras se completan a **12 dígitos** con ceros a la izquierda.
 
 ## Flujo habitual
 
-1. `QUIT` — detiene la lectura del colector  
-2. Comando de mantenimiento (login, agregar, borrar, display, etc.)  
-3. `WAKE`  
-4. `ZOOM` — vuelve a iniciar lecturas (`start read`)
+1. `QUIT` — detiene la lectura  
+2. Comando de mantenimiento  
+3. `WAKE` — inicializa  
+4. `ZOOM` — start read  
 
-Si tras `QUIT` responde **lock**, enviar login `PWR666666` hasta obtener **unlock**.
+Si tras `QUIT` responde **lock** → `PWR666666` hasta **unlock**.
 
-## Mapa de comandos
+## Los 13 comandos del manual
 
-| Función | Comando | Notas |
-|---------|---------|--------|
-| Login | `PWR666666` | Cuando hay lock |
-| Versión | `VER` | v1≈CCE16… / v2≈SLD16… |
-| Cantidad medidores | `O` | Muestra AMRsw, IDnum, etc. |
-| Horarios polling | `i` | Tras QUIT |
-| Lectura directa | `R`+medidor(12)+`F03`+flags | Ej. `R000023388410F0318121606` |
-| Display ON/OFF | `XFKG`+medidor+`01`/`00` | Tras QUIT |
-| Refresco forzado | `SGXF`+medidor | Tras QUIT |
-| Borrar medidor | `E`+medidor | Tras QUIT |
-| Agregar medidor | `A`+medidor+cabecera | O `A`+medidor+`00` (CP4) |
-| Reiniciar ciclo (K) | `k=10100000` | AMRsw debe quedar `10100000` |
-| Borrar base | `DEL` | Tras QUIT OK — borra todos los medidores |
-| Set fecha/hora | `C`+AAMMDDHHMMSS | 12 dígitos |
+| # | Función | Comando / secuencia |
+|---|---------|---------------------|
+| 1 | Lectura directa | `R`+medidor(12)+`F031812` (F18 lectura, F12 fecha). Cabecera/display **obsoletos**. |
+| 2 | Refresco forzado | `QUIT` → `SGXF`+medidor → `WAKE` → `ZOOM` |
+| 3 | Borrar medidor | `QUIT` → `E`+medidor → `WAKE` → `ZOOM` |
+| 4 | Agregar medidor | `QUIT` → `A`+medidor[+cabecera] → `WAKE` → `ZOOM`. CP4: `A`+medidor+`00` |
+| 5 | Login | `PWR666666` |
+| 6 | Versión | `VER` → `CCE16…`=v1, `SLD16…`=v2 |
+| 7 | Cantidad medidores | `QUIT` → `O` (IDnum, AMRsw, etc.) |
+| 8 | Reiniciar ciclo K | `k=10100000` (AMRsw debe quedar `10100000`) |
+| 9 | Forzar lecturas | `QUIT` → `WAKE` → `ZOOM` |
+| 10 | Ver horarios | `QUIT` → `i` |
+| 11 | Insertar horarios | Colector **sin** horarios previos. Comando de escritura no detallado en el manual. |
+| 12 | Fecha/hora | `C`+AAMMDDHHMMSS |
+| 13 | Borrar base | `QUIT` (OK) → `DEL` |
 
-### Flags de lectura directa
-
-- `18` lectura  
-- `12` fecha/hora  
-- `16` cabecera  
-- `06` status display  
-
-### Lectura multi-tarifa (T1–T4)
-
-Según logs RemoteCOM / Leitura Massiva:
-
-| Flag | Campo |
-|------|--------|
-| F18 | T1 |
-| F20 | T2 |
-| F21 | T3 |
-| F22 | T4 |
-| F19 | Total |
-| F12 | Fecha |
-
-Comando: `R` + medidor(12) + `F03182021221912`  
-Listado por índice: `R0000F03182021221912`, `R0001F03…` (usar comando `O` para cantidad).
-
-### Carga masiva
-
-No hay comando especial: secuencia `QUIT` → varios `A…` → `WAKE` → `ZOOM`.  
-Formatos en la pestaña **Carga masiva** de la app.
-
+### Interpretación lectura directa
 
 Ejemplo: `000023388410 F0318121606 01 000025710040 090527060924 000090059613 01`
 
 - Lectura `000025710040` → **2571.40**  
-- Fecha `090527060924` → **09-05-27 06:09:24**  
-- Display `01` = ON, `00` = OFF  
+- Fecha `090527060924` → **2009-05-27 06:09:24**  
+
+### Respuesta comando `i` (horarios)
+
+```
+Vendo horarios de pooling
+Total de poolings: 3
+1 - De 00:00 até 03:59
+2 - De 04:00 até 15:59
+3 - De 16:00 até  2359
+```
 
 ## Código
 
-- Implementación: `src/protocol.py`  
-- Botones de UI: `src/ui/app_window.py`
+- `src/protocol.py` — comandos y parsers  
+- `src/ui/app_window.py` — pestaña Comandos  
+- `src/ui/extra_tabs.py` — Reloj / horarios / medidores / carga masiva  

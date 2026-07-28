@@ -5,5 +5,7 @@
   "parity": "N",
   "stopbits": 1,
   "timeout": 1.0,
-  "line_ending": "\r\n"
+  "line_ending": "\r\n",
+  "last_meter": "",
+  "last_header": ""
 }

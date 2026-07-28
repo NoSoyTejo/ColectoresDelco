@@ -12,7 +12,7 @@ from typing import Any, Dict, Iterable, Optional
 import customtkinter as ctk
 
 from app_paths import logs_dir, settings_path
-from command_queue import SerialCommandQueue
+from command_queue import QueuedCommand, SerialCommandQueue
 from session_log import SessionLog
 from serial_client import SerialClient, describe_ports, list_serial_ports
 from ui.extra_tabs import BulkLoadTab, ClockTab, MetersTab
@@ -33,8 +33,13 @@ from protocol import (
     cmd_multitariff_read,
     cmd_restart_reading,
     describe_lock_state,
+    describe_status_response,
     format_command,
     format_meter_reading_summary,
+    is_clock_only_reading,
+    is_lock_response,
+    is_unlock_response,
+    parse_collector_clock,
     parse_collector_info,
     parse_direct_read_response,
     parse_meter_reading,
@@ -110,11 +115,14 @@ class AppWindow(ctk.CTk):
         )
         self.session_log = SessionLog()
         self.command_queue = SerialCommandQueue(
-            send_command=self._send_raw,
+            send_command=lambda cmd, wt=0.0: self._send_raw(cmd, write_timeout_s=wt),
             on_log=self._append_log,
-            pause_ms=350,
+            pause_ms=500,
+            rx_timeout_ms=15000,
             schedule=lambda ms, fn: self.after(ms, fn),
         )
+        self._last_error_msg = ""
+        self._auto_login_pending = False
 
         self._build_ui()
         self._refresh_ports()
@@ -190,11 +198,19 @@ class AppWindow(ctk.CTk):
         self.ending_menu.grid(row=0, column=6, padx=4, pady=12)
 
         self.btn_connect = ctk.CTkButton(conn, text="Conectar", width=110, command=self._toggle_connect)
-        self.btn_connect.grid(row=0, column=7, padx=(8, 12), pady=12)
+        self.btn_connect.grid(row=0, column=7, padx=(8, 4), pady=12)
+        self.btn_cancel_seq = ctk.CTkButton(
+            conn,
+            text="Cancelar secuencia",
+            width=140,
+            fg_color=("gray70", "gray35"),
+            command=self._cancel_sequence,
+        )
+        self.btn_cancel_seq.grid(row=0, column=8, padx=(4, 12), pady=12)
 
         self.status_var = ctk.StringVar(value="Desconectado — el colector no está en uso")
         ctk.CTkLabel(conn, textvariable=self.status_var, anchor="w").grid(
-            row=1, column=0, columnspan=8, padx=12, pady=(0, 10), sticky="ew"
+            row=1, column=0, columnspan=9, padx=12, pady=(0, 10), sticky="ew"
         )
 
         # --- Pestañas ---
@@ -209,7 +225,7 @@ class AppWindow(ctk.CTk):
         tab_cmds.grid_columnconfigure(0, weight=1)
         tab_cmds.grid_rowconfigure(0, weight=1)
 
-        cmds = ctk.CTkScrollableFrame(tab_cmds, label_text="Comandos del colector")
+        cmds = ctk.CTkScrollableFrame(tab_cmds, label_text="Comandos según Comados.doc")
         cmds.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
         cmds.grid_columnconfigure(0, weight=1)
         cmds.grid_columnconfigure(1, weight=1)
@@ -222,7 +238,7 @@ class AppWindow(ctk.CTk):
             row=1, column=0, columnspan=2, padx=8, pady=(0, 8), sticky="ew"
         )
 
-        ctk.CTkLabel(cmds, text="Cabecera (12 dígitos, si aplica)").grid(
+        ctk.CTkLabel(cmds, text="Cabecera (solo al agregar medidor con cabezal)").grid(
             row=2, column=0, columnspan=2, padx=8, pady=(4, 2), sticky="w"
         )
         self.header_var = ctk.StringVar(value=str(self.settings.get("last_header") or ""))
@@ -230,39 +246,46 @@ class AppWindow(ctk.CTk):
             row=3, column=0, columnspan=2, padx=8, pady=(0, 8), sticky="ew"
         )
 
-        # Flujo base
-        ctk.CTkLabel(cmds, text="Flujo base", font=ctk.CTkFont(weight="bold")).grid(
+        # §5, §9 — Login y flujo base
+        ctk.CTkLabel(cmds, text="1. Flujo base (QUIT / Login / WAKE / ZOOM)", font=ctk.CTkFont(weight="bold")).grid(
             row=4, column=0, columnspan=2, padx=8, pady=(8, 4), sticky="w"
         )
         self._cmd_btn(cmds, 5, 0, "QUIT (detener)", lambda: self._send_one(CMD_QUIT))
         self._cmd_btn(cmds, 5, 1, "Login PWR666666", lambda: self._send_one(CMD_LOGIN))
-        self._cmd_btn(cmds, 6, 0, "WAKE", lambda: self._send_one(CMD_WAKE))
-        self._cmd_btn(cmds, 6, 1, "ZOOM (start read)", lambda: self._send_one(CMD_ZOOM))
-        self._cmd_btn(cmds, 7, 0, "VER (versión)", lambda: self._send_one(CMD_VERSION))
-        self._cmd_btn(cmds, 7, 1, "O (cant. medidores)", lambda: self._send_one(CMD_COUNT_METERS))
-        self._cmd_btn(cmds, 8, 0, "i (horarios polling)", lambda: self._send_one(CMD_POLLING_SCHEDULE))
-        self._cmd_btn(cmds, 8, 1, "K k=10100000", lambda: self._send_one(cmd_restart_reading()))
-        self._cmd_btn(cmds, 9, 0, "Diagnóstico VER+O", self._do_quick_diag)
+        self._cmd_btn(cmds, 6, 0, "QUIT→WAKE→ZOOM", self._do_quit_wake_zoom)
+        self._cmd_btn(cmds, 6, 1, "Diagnóstico VER+O", self._do_quick_diag)
 
-        # Lectura / medidor
-        ctk.CTkLabel(cmds, text="Lectura y medidor", font=ctk.CTkFont(weight="bold")).grid(
+        # §1 lectura, §2 refresco
+        ctk.CTkLabel(cmds, text="2. Lectura y refresco (§1–§2)", font=ctk.CTkFont(weight="bold")).grid(
+            row=7, column=0, columnspan=2, padx=8, pady=(12, 4), sticky="w"
+        )
+        self._cmd_btn(cmds, 8, 0, "Lectura R…F031812", self._do_direct_read)
+        self._cmd_btn(cmds, 8, 1, "Refresco SGXF…", self._do_refresh)
+        self._cmd_btn(cmds, 9, 0, "Lectura T1–T4", self._do_multitariff_read)
+
+        # §3–§4 medidores
+        ctk.CTkLabel(cmds, text="3. Medidores (§3–§4, §13)", font=ctk.CTkFont(weight="bold")).grid(
             row=10, column=0, columnspan=2, padx=8, pady=(12, 4), sticky="w"
         )
-        self._cmd_btn(cmds, 11, 0, "Lectura directa R…", self._do_direct_read)
-        self._cmd_btn(cmds, 11, 1, "Refresco SGXF…", self._do_refresh)
-        self._cmd_btn(cmds, 12, 0, "Display ON", lambda: self._do_display(True))
-        self._cmd_btn(cmds, 12, 1, "Display OFF", lambda: self._do_display(False))
-        self._cmd_btn(cmds, 13, 0, "Agregar medidor A…", self._do_add_meter)
-        self._cmd_btn(cmds, 13, 1, "Borrar medidor E…", self._do_delete_meter)
-        self._cmd_btn(cmds, 14, 0, "Agregar CP4 (A…00)", self._do_add_individual)
-        self._cmd_btn(cmds, 14, 1, "DEL (borrar base)", lambda: self._send_one(CMD_DELETE_BASE))
-        self._cmd_btn(cmds, 15, 0, "Lectura T1-T4", self._do_multitariff_read)
+        self._cmd_btn(cmds, 11, 0, "Agregar A…", self._do_add_meter)
+        self._cmd_btn(cmds, 11, 1, "Borrar E…", self._do_delete_meter)
+        self._cmd_btn(cmds, 12, 0, "Agregar CP4 (A…00)", self._do_add_individual)
+        self._cmd_btn(cmds, 12, 1, "DEL (borrar base)", self._do_delete_base)
+
+        # §6–§8 info
+        ctk.CTkLabel(cmds, text="4. Información (§6–§8)", font=ctk.CTkFont(weight="bold")).grid(
+            row=13, column=0, columnspan=2, padx=8, pady=(12, 4), sticky="w"
+        )
+        self._cmd_btn(cmds, 14, 0, "VER (versión)", lambda: self._send_one(CMD_VERSION))
+        self._cmd_btn(cmds, 14, 1, "O (cant. medidores)", self._do_count_meters)
+        self._cmd_btn(cmds, 15, 0, "K k=10100000", lambda: self._send_one(cmd_restart_reading()))
+        self._cmd_btn(cmds, 15, 1, "i (horarios) → pestaña Reloj", lambda: self.tabview.set("Reloj"))
 
         note = ctk.CTkLabel(
             cmds,
-            text="Muchas operaciones piden QUIT antes y WAKE+ZOOM después. "
-            "Si responde lock, use Login.",
-            wraplength=320,
+            text="Según Comados.doc: casi todo usa QUIT → comando → WAKE → ZOOM. "
+            "Cabecera/display están obsoletos. Horarios y reloj: pestaña Reloj.",
+            wraplength=420,
             justify="left",
             text_color=("gray40", "gray60"),
         )
@@ -275,7 +298,9 @@ class AppWindow(ctk.CTk):
         ).grid(row=17, column=0, columnspan=2, padx=8, pady=(0, 8), sticky="ew")
 
         self.clock_tab = ClockTab(tab_clock, self)
-        self.clock_tab.pack(fill="both", expand=True)
+        self.clock_tab.grid(row=0, column=0, sticky="nsew")
+        tab_clock.grid_columnconfigure(0, weight=1)
+        tab_clock.grid_rowconfigure(0, weight=1)
         self.meters_tab = MetersTab(tab_meters, self)
         self.meters_tab.pack(fill="both", expand=True)
         self.bulk_tab = BulkLoadTab(tab_bulk, self)
@@ -353,6 +378,8 @@ class AppWindow(ctk.CTk):
 
     def _toggle_connect(self) -> None:
         if self.client.is_connected:
+            if self.command_queue.is_busy:
+                self.command_queue.cancel()
             self.client.disconnect()
             self._append_log("INFO", "Desconectado")
             return
@@ -380,7 +407,9 @@ class AppWindow(ctk.CTk):
         self.settings["baudrate"] = baud
         self.settings["line_ending"] = self._current_line_ending()
         save_settings(self.settings)
+        self._last_error_msg = ""
         self._append_log("INFO", f"Conectado a {port} @ {baud} baud")
+        self.after(400, self._send_initial_login)
 
     def _persist_meter_fields(self) -> None:
         self.settings["last_meter"] = self.meter_var.get().strip()
@@ -395,35 +424,89 @@ class AppWindow(ctk.CTk):
         self._persist_meter_fields()
         return meter
 
-    def _send_raw(self, command: str) -> None:
+    def _cancel_sequence(self) -> None:
+        if self.command_queue.is_busy:
+            self.command_queue.cancel()
+            self._append_log("INFO", "Secuencia cancelada por el usuario")
+        else:
+            self._append_log("INFO", "No hay secuencia en curso")
+
+    def _send_initial_login(self) -> None:
+        if not self.client.is_connected or self.command_queue.is_busy:
+            return
+        try:
+            self._append_log("INFO", "Login inicial PWR666666…")
+            self._auto_login_pending = True
+            self._send_raw(CMD_LOGIN)
+        except ConnectionError:
+            self._auto_login_pending = False
+
+    def _auto_login_on_lock(self) -> None:
+        if not self.client.is_connected or self._auto_login_pending or self.command_queue.is_busy:
+            return
+        try:
+            self._append_log("INFO", "Login automático PWR666666…")
+            self._auto_login_pending = True
+            self._send_raw(CMD_LOGIN)
+        except ConnectionError:
+            self._auto_login_pending = False
+
+    def _send_raw(self, command: str, write_timeout_s: float = 0.0) -> bool:
         if not self.client.is_connected:
             self._append_log("ERR", "No hay conexión activa")
-            return
+            return False
         ending = self._current_line_ending()
         try:
-            self.client.send(format_command(command, ending))
+            timeout = write_timeout_s if write_timeout_s > 0 else None
+            self.client.send(format_command(command, ending), write_timeout=timeout)
             shown = command.replace("\r", "\\r").replace("\n", "\\n")
             self._append_log("TX", shown)
+            return True
         except ConnectionError as exc:
             self._append_log("ERR", str(exc))
+            self.command_queue.on_send_failed()
+            self._on_connection_lost(str(exc))
+            return False
+
+    def _on_connection_lost(self, reason: str) -> None:
+        if reason == self._last_error_msg:
+            return
+        self._last_error_msg = reason
+        if self.command_queue.is_busy:
+            self.command_queue.cancel()
+        self._append_log(
+            "INFO",
+            "Puerto COM perdido o bloqueado. Desenchufe el USB, espere 5 s, "
+            "pulse Refrescar y vuelva a Conectar. Cierre RemoteCOM si está abierto.",
+        )
 
     def _send_one(self, command: str) -> None:
+        if self.command_queue.is_busy:
+            self._append_log("ERR", "Hay una secuencia en curso. Espere o pulse Desconectar.")
+            return
         self.cmd_var.set(command)
         self._send_command()
 
-    def _send_many(self, commands: Iterable[str], pause_ms: int = 250) -> None:
+    def _send_many(
+        self,
+        commands: Iterable[str],
+        pause_ms: int = 500,
+        wait_rx: bool = False,
+        on_done: Optional[Any] = None,
+    ) -> None:
         cmds = [c for c in commands if c]
         if not cmds:
             return
-
-        def _step(index: int) -> None:
-            if index >= len(cmds):
-                return
-            self._send_one(cmds[index])
-            if index + 1 < len(cmds):
-                self.after(pause_ms, lambda: _step(index + 1))
-
-        _step(0)
+        if not self.client.is_connected:
+            self._append_log("ERR", "No hay conexión activa")
+            return
+        if self.command_queue.is_busy:
+            self._append_log("ERR", "Hay una secuencia en curso. Espere o pulse Desconectar.")
+            return
+        try:
+            self.command_queue.start(cmds, wait_rx=wait_rx, on_done=on_done)
+        except RuntimeError as exc:
+            self._append_log("ERR", str(exc))
 
     def _send_command(self) -> None:
         text = self.cmd_var.get().strip()
@@ -440,6 +523,8 @@ class AppWindow(ctk.CTk):
             self._append_log("TX", shown)
         except ConnectionError as exc:
             self._append_log("ERR", str(exc))
+            self.command_queue.on_send_failed()
+            self._on_connection_lost(str(exc))
 
     def _do_direct_read(self) -> None:
         meter = self._require_meter()
@@ -509,14 +594,30 @@ class AppWindow(ctk.CTk):
             self._append_log("ERR", str(exc))
 
     def _do_quit_wake_zoom(self) -> None:
-        self._send_many([CMD_QUIT, CMD_WAKE, CMD_ZOOM])
+        """§9 Comados.doc: forzar actualización de lecturas."""
+        from ui.extra_tabs import WAKE_SLOW, ZOOM_CMD
+
+        self._append_log("INFO", "Forzar lecturas: QUIT → WAKE → ZOOM")
+        self._send_many([CMD_QUIT, WAKE_SLOW, ZOOM_CMD], wait_rx=True)
+
+    def _do_count_meters(self) -> None:
+        """§7 Comados.doc: QUIT → O."""
+        self._send_many(
+            [CMD_QUIT, QueuedCommand(CMD_COUNT_METERS, multiline_ms=2000, rx_timeout_ms=20000)],
+            wait_rx=True,
+        )
+
+    def _do_delete_base(self) -> None:
+        """§13 Comados.doc: QUIT (OK) → DEL."""
+        self._append_log("WARN", "Borrar base: QUIT → DEL (elimina todos los medidores)")
+        self._send_many([CMD_QUIT, CMD_DELETE_BASE], wait_rx=True)
 
     def _do_quick_diag(self) -> None:
         """Versión + estado del colector (comandos seguros de consulta)."""
         if not self.client.is_connected:
             self._append_log("ERR", "Conecte primero al colector")
             return
-        self._send_many([CMD_VERSION, CMD_COUNT_METERS], pause_ms=400)
+        self._send_many([CMD_VERSION, CMD_COUNT_METERS], wait_rx=True)
 
     def _open_logs_folder(self) -> None:
         import os
@@ -555,33 +656,46 @@ class AppWindow(ctk.CTk):
                 if kind == "data":
                     text = payload.rstrip("\r\n")
                     self._append_log("RX", text)
+                    if is_lock_response(text):
+                        tip = describe_lock_state(text)
+                        if tip:
+                            self._append_log("INFO", tip)
+                        self._auto_login_on_lock()
+                        continue
+                    if is_unlock_response(text):
+                        self._auto_login_pending = False
+                        tip = describe_lock_state(text)
+                        if tip:
+                            self._append_log("INFO", tip)
+                        self.command_queue.on_unlock()
+                        continue
                     self.command_queue.on_rx(text)
-                    tip = describe_lock_state(text)
+                    tip = describe_status_response(text, self.command_queue.last_command)
                     if tip:
-                        self._append_log("INFO", tip)
+                        self._append_log("WARN", tip)
                     if parse_collector_info(text):
                         self.meters_tab.on_collector_info(text)
+                    self.clock_tab.on_rx(text)
                     meter = parse_meter_reading(text)
-                    if meter and not self.meters_tab._scan_active:
+                    if meter and not self.meters_tab._scan_active and not is_clock_only_reading(meter):
                         self.meters_tab.on_meter_rx(text)
                     parsed = parse_direct_read_response(text)
                     if parsed and parsed.reading_value is not None:
-                        disp = (
-                            "ON"
-                            if parsed.display_on is True
-                            else "OFF"
-                            if parsed.display_on is False
-                            else "?"
-                        )
-                        self._append_log(
-                            "INFO",
-                            f"Lectura={parsed.reading_value} | Fecha={parsed.datetime_text} | "
-                            f"Cabecera={parsed.header} | Display={disp}",
-                        )
+                        parts = [f"Lectura={parsed.reading_value}"]
+                        if parsed.datetime_text:
+                            parts.append(f"Fecha={parsed.datetime_text}")
+                        if parsed.header:
+                            parts.append(f"Cabecera={parsed.header}")
+                        self._append_log("INFO", " | ".join(parts))
                 elif kind == "error":
                     self._append_log("ERR", str(payload))
                 elif kind == "status":
-                    self._set_connected_ui(bool(payload))
+                    connected = bool(payload)
+                    if not connected:
+                        if self.command_queue.is_busy:
+                            self.command_queue.cancel()
+                        self._last_error_msg = ""
+                    self._set_connected_ui(connected)
         except queue.Empty:
             pass
         self.after(100, self._process_ui_queue)
@@ -593,7 +707,7 @@ class AppWindow(ctk.CTk):
             self.port_menu.configure(state="disabled")
             self.baud_menu.configure(state="disabled")
         else:
-            self.status_var.set("Desconectado — el colector no está en uso")
+            self.status_var.set("Desconectado — enchufe USB y pulse Conectar")
             self.btn_connect.configure(text="Conectar")
             self.port_menu.configure(state="normal")
             self.baud_menu.configure(state="normal")
@@ -609,23 +723,23 @@ class AppWindow(ctk.CTk):
         text.pack(fill="both", expand=True, padx=12, pady=12)
         text.insert(
             "1.0",
-            "Según ComandosColectores.doc\n\n"
-            "QUIT — Detiene el proceso de lectura del colector. Muchas operaciones lo piden primero.\n"
-            "Login PWR666666 — Si responde lock, desbloquea (debe responder unlock).\n"
-            "WAKE / ZOOM — Reinician lecturas (ZOOM = start read).\n"
-            "VER — Versión/protocolo (ej. CCE16 v3.0.26 o SLD16 v3.1.41).\n"
-            "O — Cantidad de medidores y estado AMRsw.\n"
-            "K (k=10100000) — Deja AMRsw=10100000 para reiniciar el ciclo de lectura.\n\n"
-            "Lectura directa R… — R + medidor(12) + F0318121606 (lectura, fecha, cabecera, display).\n"
-            "Display ON/OFF — XFKG + medidor + 01/00 (envía QUIT antes y WAKE+ZOOM después).\n"
-            "Refresco SGXF — Fuerza refresco del medidor.\n"
-            "Agregar A… / CP4 — Alta de medidor (con cabecera o tarifa 00).\n"
-            "Borrar E… — Elimina un medidor.\n"
-            "DEL — Borra toda la base del colector (cuidado).\n"
-            "Set reloj C… — C + AAMMDDHHMMSS (pestaña Reloj).\n"
-            "Medidores — lectura T1-T4 y escaneo por índice (R0000…).\n"
-            "Carga masiva — pegar/cargar archivo con comandos A o medidor,cabecera.\n\n"
-            "Puerto / Velocidad / Conectar — Abren el canal USB. Al terminar: Desconectar y retirar USB.\n",
+            "Según Comados.doc (manual de comandos del colector)\n\n"
+            "Flujo habitual: QUIT → comando → WAKE → ZOOM.\n"
+            "Si responde lock → Login PWR666666 (unlock).\n\n"
+            "§1 Lectura R…F031812 — lectura (F18) + fecha (F12). Cabecera/display obsoletos.\n"
+            "§2 Refresco SGXF — QUIT → SGXF+medidor → WAKE → ZOOM.\n"
+            "§3 Borrar E… / §4 Agregar A… / CP4 A…00.\n"
+            "§5 Login PWR666666.\n"
+            "§6 VER — CCE16=v1, SLD16=v2.\n"
+            "§7 O — cantidad de medidores (IDnum, AMRsw…).\n"
+            "§8 K k=10100000 — AMRsw debe quedar 10100000.\n"
+            "§9 QUIT→WAKE→ZOOM — forzar lecturas.\n"
+            "§10–§11 Horarios — pestaña Reloj (comando i / Upload).\n"
+            "§12 Reloj C… — Sync System Time en pestaña Reloj.\n"
+            "§13 DEL — borrar toda la base (cuidado).\n\n"
+            "Medidores — T1–T4 (extensión RemoteCOM).\n"
+            "Carga masiva — varios A… en lote.\n"
+            "Al terminar: Desconectar y retirar USB.\n",
         )
         text.configure(state="disabled")
         ctk.CTkButton(dialog, text="Cerrar", width=100, command=dialog.destroy).pack(pady=(0, 12))
