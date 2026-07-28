@@ -1,0 +1,6 @@
+# Ejemplo carga masiva — Proyecto Colectores
+# Formato: medidor,cabecera  |  medidor solo (CP4)  |  comando A completo
+
+23388410,90059613
+23388411,90059613
+A00002338841200

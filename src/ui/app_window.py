@@ -11,7 +11,11 @@ from typing import Any, Dict, Iterable, Optional
 
 import customtkinter as ctk
 
+from app_paths import logs_dir, settings_path
+from command_queue import SerialCommandQueue
+from session_log import SessionLog
 from serial_client import SerialClient, describe_ports, list_serial_ports
+from ui.extra_tabs import BulkLoadTab, ClockTab, MetersTab
 from protocol import (
     CMD_COUNT_METERS,
     CMD_DELETE_BASE,
@@ -26,20 +30,19 @@ from protocol import (
     cmd_direct_read,
     cmd_display,
     cmd_forced_refresh,
+    cmd_multitariff_read,
     cmd_restart_reading,
-    cmd_set_clock,
     describe_lock_state,
     format_command,
+    format_meter_reading_summary,
+    parse_collector_info,
     parse_direct_read_response,
+    parse_meter_reading,
 )
 
 
-def _project_root() -> Path:
-    return Path(__file__).resolve().parents[2]
-
-
 def _settings_path() -> Path:
-    return _project_root() / "config" / "settings.json"
+    return settings_path()
 
 
 def load_settings() -> Dict[str, Any]:
@@ -56,6 +59,8 @@ def load_settings() -> Dict[str, Any]:
         "last_header": "",
     }
     if not path.exists():
+        defaults_copy = dict(defaults)
+        save_settings(defaults_copy)
         return defaults
     try:
         with path.open("r", encoding="utf-8") as fh:
@@ -88,8 +93,8 @@ class AppWindow(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Proyecto Colectores")
-        self.geometry("1100x780")
-        self.minsize(960, 680)
+        self.geometry("1180x860")
+        self.minsize(1000, 720)
 
         ctk.set_appearance_mode("System")
         ctk.set_default_color_theme("blue")
@@ -102,6 +107,13 @@ class AppWindow(ctk.CTk):
             on_data=self._on_serial_data,
             on_error=self._on_serial_error,
             on_status=self._on_serial_status,
+        )
+        self.session_log = SessionLog()
+        self.command_queue = SerialCommandQueue(
+            send_command=self._send_raw,
+            on_log=self._append_log,
+            pause_ms=350,
+            schedule=lambda ms, fn: self.after(ms, fn),
         )
 
         self._build_ui()
@@ -121,6 +133,7 @@ class AppWindow(ctk.CTk):
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(3, weight=1)
+        self.grid_rowconfigure(4, weight=1)
 
         header = ctk.CTkLabel(
             self,
@@ -184,29 +197,20 @@ class AppWindow(ctk.CTk):
             row=1, column=0, columnspan=8, padx=12, pady=(0, 10), sticky="ew"
         )
 
-        # --- Centro: log + panel comandos ---
-        center = ctk.CTkFrame(self, fg_color="transparent")
-        center.grid(row=3, column=0, padx=16, pady=8, sticky="nsew")
-        center.grid_columnconfigure(0, weight=3)
-        center.grid_columnconfigure(1, weight=2)
-        center.grid_rowconfigure(0, weight=1)
+        # --- Pestañas ---
+        self.tabview = ctk.CTkTabview(self)
+        self.tabview.grid(row=3, column=0, padx=16, pady=8, sticky="nsew")
 
-        log_frame = ctk.CTkFrame(center)
-        log_frame.grid(row=0, column=0, padx=(0, 8), sticky="nsew")
-        log_frame.grid_columnconfigure(0, weight=1)
-        log_frame.grid_rowconfigure(1, weight=1)
+        tab_cmds = self.tabview.add("Comandos")
+        tab_clock = self.tabview.add("Reloj")
+        tab_meters = self.tabview.add("Medidores")
+        tab_bulk = self.tabview.add("Carga masiva")
 
-        ctk.CTkLabel(
-            log_frame,
-            text="Historial (TX = enviado, RX = respuesta)",
-            font=ctk.CTkFont(weight="bold"),
-        ).grid(row=0, column=0, padx=12, pady=(10, 4), sticky="w")
-        self.log_box = ctk.CTkTextbox(log_frame, font=ctk.CTkFont(family="Consolas", size=13))
-        self.log_box.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="nsew")
-        self.log_box.configure(state="disabled")
+        tab_cmds.grid_columnconfigure(0, weight=1)
+        tab_cmds.grid_rowconfigure(0, weight=1)
 
-        cmds = ctk.CTkScrollableFrame(center, label_text="Comandos del colector")
-        cmds.grid(row=0, column=1, sticky="nsew")
+        cmds = ctk.CTkScrollableFrame(tab_cmds, label_text="Comandos del colector")
+        cmds.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
         cmds.grid_columnconfigure(0, weight=1)
         cmds.grid_columnconfigure(1, weight=1)
 
@@ -238,29 +242,21 @@ class AppWindow(ctk.CTk):
         self._cmd_btn(cmds, 7, 1, "O (cant. medidores)", lambda: self._send_one(CMD_COUNT_METERS))
         self._cmd_btn(cmds, 8, 0, "i (horarios polling)", lambda: self._send_one(CMD_POLLING_SCHEDULE))
         self._cmd_btn(cmds, 8, 1, "K k=10100000", lambda: self._send_one(cmd_restart_reading()))
+        self._cmd_btn(cmds, 9, 0, "Diagnóstico VER+O", self._do_quick_diag)
 
         # Lectura / medidor
         ctk.CTkLabel(cmds, text="Lectura y medidor", font=ctk.CTkFont(weight="bold")).grid(
-            row=9, column=0, columnspan=2, padx=8, pady=(12, 4), sticky="w"
+            row=10, column=0, columnspan=2, padx=8, pady=(12, 4), sticky="w"
         )
-        self._cmd_btn(cmds, 10, 0, "Lectura directa R…", self._do_direct_read)
-        self._cmd_btn(cmds, 10, 1, "Refresco SGXF…", self._do_refresh)
-        self._cmd_btn(cmds, 11, 0, "Display ON", lambda: self._do_display(True))
-        self._cmd_btn(cmds, 11, 1, "Display OFF", lambda: self._do_display(False))
-        self._cmd_btn(cmds, 12, 0, "Agregar medidor A…", self._do_add_meter)
-        self._cmd_btn(cmds, 12, 1, "Borrar medidor E…", self._do_delete_meter)
-        self._cmd_btn(cmds, 13, 0, "Agregar CP4 (A…00)", self._do_add_individual)
-        self._cmd_btn(cmds, 13, 1, "DEL (borrar base)", lambda: self._send_one(CMD_DELETE_BASE))
-
-        ctk.CTkLabel(cmds, text="Fecha/hora colector (AAMMDDHHMMSS)").grid(
-            row=14, column=0, columnspan=2, padx=8, pady=(12, 2), sticky="w"
-        )
-        self.clock_var = ctk.StringVar(value="")
-        ctk.CTkEntry(cmds, textvariable=self.clock_var, placeholder_text="ej. 091012104216").grid(
-            row=15, column=0, columnspan=2, padx=8, pady=(0, 4), sticky="ew"
-        )
-        self._cmd_btn(cmds, 16, 0, "Set reloj C…", self._do_set_clock)
-        self._cmd_btn(cmds, 16, 1, "QUIT+WAKE+ZOOM", self._do_quit_wake_zoom)
+        self._cmd_btn(cmds, 11, 0, "Lectura directa R…", self._do_direct_read)
+        self._cmd_btn(cmds, 11, 1, "Refresco SGXF…", self._do_refresh)
+        self._cmd_btn(cmds, 12, 0, "Display ON", lambda: self._do_display(True))
+        self._cmd_btn(cmds, 12, 1, "Display OFF", lambda: self._do_display(False))
+        self._cmd_btn(cmds, 13, 0, "Agregar medidor A…", self._do_add_meter)
+        self._cmd_btn(cmds, 13, 1, "Borrar medidor E…", self._do_delete_meter)
+        self._cmd_btn(cmds, 14, 0, "Agregar CP4 (A…00)", self._do_add_individual)
+        self._cmd_btn(cmds, 14, 1, "DEL (borrar base)", lambda: self._send_one(CMD_DELETE_BASE))
+        self._cmd_btn(cmds, 15, 0, "Lectura T1-T4", self._do_multitariff_read)
 
         note = ctk.CTkLabel(
             cmds,
@@ -270,11 +266,39 @@ class AppWindow(ctk.CTk):
             justify="left",
             text_color=("gray40", "gray60"),
         )
-        note.grid(row=17, column=0, columnspan=2, padx=8, pady=(12, 8), sticky="ew")
+        note.grid(row=16, column=0, columnspan=2, padx=8, pady=(12, 8), sticky="ew")
+
+        ctk.CTkButton(
+            cmds,
+            text="Abrir carpeta de logs",
+            command=self._open_logs_folder,
+        ).grid(row=17, column=0, columnspan=2, padx=8, pady=(0, 8), sticky="ew")
+
+        self.clock_tab = ClockTab(tab_clock, self)
+        self.clock_tab.pack(fill="both", expand=True)
+        self.meters_tab = MetersTab(tab_meters, self)
+        self.meters_tab.pack(fill="both", expand=True)
+        self.bulk_tab = BulkLoadTab(tab_bulk, self)
+        self.bulk_tab.pack(fill="both", expand=True)
+
+        # --- Log compartido ---
+        log_frame = ctk.CTkFrame(self)
+        log_frame.grid(row=4, column=0, padx=16, pady=8, sticky="nsew")
+        log_frame.grid_columnconfigure(0, weight=1)
+        log_frame.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            log_frame,
+            text="Historial (TX = enviado, RX = respuesta)",
+            font=ctk.CTkFont(weight="bold"),
+        ).grid(row=0, column=0, padx=12, pady=(10, 4), sticky="w")
+        self.log_box = ctk.CTkTextbox(log_frame, font=ctk.CTkFont(family="Consolas", size=13))
+        self.log_box.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="nsew")
+        self.log_box.configure(state="disabled")
 
         # --- Envío libre ---
         send_frame = ctk.CTkFrame(self)
-        send_frame.grid(row=4, column=0, padx=16, pady=(0, 14), sticky="ew")
+        send_frame.grid(row=5, column=0, padx=16, pady=(0, 14), sticky="ew")
         send_frame.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(send_frame, text="Comando libre").grid(row=0, column=0, padx=(12, 4), pady=12)
@@ -371,6 +395,18 @@ class AppWindow(ctk.CTk):
         self._persist_meter_fields()
         return meter
 
+    def _send_raw(self, command: str) -> None:
+        if not self.client.is_connected:
+            self._append_log("ERR", "No hay conexión activa")
+            return
+        ending = self._current_line_ending()
+        try:
+            self.client.send(format_command(command, ending))
+            shown = command.replace("\r", "\\r").replace("\n", "\\n")
+            self._append_log("TX", shown)
+        except ConnectionError as exc:
+            self._append_log("ERR", str(exc))
+
     def _send_one(self, command: str) -> None:
         self.cmd_var.set(command)
         self._send_command()
@@ -463,15 +499,31 @@ class AppWindow(ctk.CTk):
         except ValueError as exc:
             self._append_log("ERR", str(exc))
 
-    def _do_set_clock(self) -> None:
-        value = self.clock_var.get().strip()
+    def _do_multitariff_read(self) -> None:
+        meter = self._require_meter()
+        if not meter:
+            return
         try:
-            self._send_one(cmd_set_clock(value))
+            self._send_one(cmd_multitariff_read(meter))
         except ValueError as exc:
             self._append_log("ERR", str(exc))
 
     def _do_quit_wake_zoom(self) -> None:
         self._send_many([CMD_QUIT, CMD_WAKE, CMD_ZOOM])
+
+    def _do_quick_diag(self) -> None:
+        """Versión + estado del colector (comandos seguros de consulta)."""
+        if not self.client.is_connected:
+            self._append_log("ERR", "Conecte primero al colector")
+            return
+        self._send_many([CMD_VERSION, CMD_COUNT_METERS], pause_ms=400)
+
+    def _open_logs_folder(self) -> None:
+        import os
+
+        folder = str(logs_dir())
+        os.startfile(folder)  # noqa: S606 — Windows only
+        self._append_log("INFO", f"Carpeta de logs: {folder}")
 
     def _clear_log(self) -> None:
         self.log_box.configure(state="normal")
@@ -485,6 +537,7 @@ class AppWindow(ctk.CTk):
         self.log_box.insert("end", line)
         self.log_box.see("end")
         self.log_box.configure(state="disabled")
+        self.session_log.write(kind, message)
 
     def _on_serial_data(self, text: str) -> None:
         self._ui_queue.put(("data", text))
@@ -502,9 +555,15 @@ class AppWindow(ctk.CTk):
                 if kind == "data":
                     text = payload.rstrip("\r\n")
                     self._append_log("RX", text)
+                    self.command_queue.on_rx(text)
                     tip = describe_lock_state(text)
                     if tip:
                         self._append_log("INFO", tip)
+                    if parse_collector_info(text):
+                        self.meters_tab.on_collector_info(text)
+                    meter = parse_meter_reading(text)
+                    if meter and not self.meters_tab._scan_active:
+                        self.meters_tab.on_meter_rx(text)
                     parsed = parse_direct_read_response(text)
                     if parsed and parsed.reading_value is not None:
                         disp = (
@@ -563,7 +622,9 @@ class AppWindow(ctk.CTk):
             "Agregar A… / CP4 — Alta de medidor (con cabecera o tarifa 00).\n"
             "Borrar E… — Elimina un medidor.\n"
             "DEL — Borra toda la base del colector (cuidado).\n"
-            "Set reloj C… — C + AAMMDDHHMMSS (12 dígitos).\n\n"
+            "Set reloj C… — C + AAMMDDHHMMSS (pestaña Reloj).\n"
+            "Medidores — lectura T1-T4 y escaneo por índice (R0000…).\n"
+            "Carga masiva — pegar/cargar archivo con comandos A o medidor,cabecera.\n\n"
             "Puerto / Velocidad / Conectar — Abren el canal USB. Al terminar: Desconectar y retirar USB.\n",
         )
         text.configure(state="disabled")
@@ -574,6 +635,7 @@ class AppWindow(ctk.CTk):
             self._persist_meter_fields()
             if self.client.is_connected:
                 self.client.disconnect()
+            self.session_log.close()
         finally:
             self.destroy()
 
@@ -584,8 +646,7 @@ def run_app() -> None:
 
 
 if __name__ == "__main__":
-    root = _project_root()
-    src = root / "src"
+    src = Path(__file__).resolve().parents[1]
     if str(src) not in sys.path:
         sys.path.insert(0, str(src))
     run_app()

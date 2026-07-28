@@ -49,7 +49,27 @@ Si tras `QUIT` responde **lock**, enviar login `PWR666666` hasta obtener **unloc
 - `16` cabecera  
 - `06` status display  
 
-### Interpretación de respuesta de lectura
+### Lectura multi-tarifa (T1–T4)
+
+Según logs RemoteCOM / Leitura Massiva:
+
+| Flag | Campo |
+|------|--------|
+| F18 | T1 |
+| F20 | T2 |
+| F21 | T3 |
+| F22 | T4 |
+| F19 | Total |
+| F12 | Fecha |
+
+Comando: `R` + medidor(12) + `F03182021221912`  
+Listado por índice: `R0000F03182021221912`, `R0001F03…` (usar comando `O` para cantidad).
+
+### Carga masiva
+
+No hay comando especial: secuencia `QUIT` → varios `A…` → `WAKE` → `ZOOM`.  
+Formatos en la pestaña **Carga masiva** de la app.
+
 
 Ejemplo: `000023388410 F0318121606 01 000025710040 090527060924 000090059613 01`
 

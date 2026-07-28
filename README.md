@@ -25,6 +25,12 @@ pip install -r requirements.txt
 ## Uso
 
 ```powershell
+.\run.ps1
+```
+
+O manualmente:
+
+```powershell
 .\venv\Scripts\Activate.ps1
 python src\main.py
 ```
@@ -32,22 +38,35 @@ python src\main.py
 1. Conectar el cable USB → verificar que aparece un `COMx` en **Refrescar**
 2. Elegir puerto y baud rate (ver `docs/protocolo.md`)
 3. **Conectar**
-4. Escribir un comando y **Enviar**, o usar los atajos (Versión / K)
-5. Revisar respuestas en el log (`TX` = enviado, `RX` = recibido)
+4. Usar los botones del panel o escribir un comando y **Enviar**
+5. Revisar respuestas en el historial (`TX` = enviado, `RX` = recibido)
 
-La última configuración (puerto, baud, fin de línea) se guarda en `config/settings.json`.
+La configuración se guarda en `config/settings.json`. Cada sesión deja un archivo en `logs/`.
+
+## Ejecutable para producción (sin instalar Python)
+
+```powershell
+.\scripts\build_exe.ps1
+```
+
+Genera `dist\ProyectoColectores\ProyectoColectores.exe`. Copie esa carpeta completa a los PCs de campo (junto con el driver USB-serial).
 
 ## Estructura
 
 ```
 ProyectoColectores/
   config/settings.json   # puerto/baud persistentes
-  docs/                  # protocolo y parámetros serial
+  logs/                  # historial por sesión (soporte)
+  docs/                  # protocolo y manual
+  scripts/build_exe.ps1  # empaquetar .exe
+  run.ps1                # arranque rápido en desarrollo
   src/
-    main.py              # arranque
-    serial_client.py     # capa COM thread-safe
-    protocol.py          # comandos tipados (Fase 2)
-    ui/app_window.py     # interfaz
+    main.py
+    app_paths.py         # rutas dev / .exe
+    session_log.py       # log a archivo
+    serial_client.py
+    protocol.py
+    ui/app_window.py
   requirements.txt
 ```
 
@@ -60,11 +79,12 @@ ProyectoColectores/
 
 ## Fase 2 — comandos documentados
 
-Implementados según `docs/ComandosColectores.doc`:
+Implementados según `docs/ComandosColectores.doc` y logs RemoteCOM:
 
-- Login `PWR666666`, `VER`, `QUIT` / `WAKE` / `ZOOM`
-- Lectura directa `R…`, display, refresco, agregar/borrar medidor
-- Comando K `k=10100000`, cantidad `O`, reloj `C…`, `DEL`
+- Login, VER, QUIT/WAKE/ZOOM, lectura directa y **T1–T4**
+- Pestaña **Reloj**: ajustar hora del colector (`C…`)
+- Pestaña **Medidores**: listar/escanear con lecturas T1–T4
+- Pestaña **Carga masiva**: importar TXT/CSV y enviar comandos `A…`
 
 ## Repositorio
 

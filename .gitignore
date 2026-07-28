@@ -7,4 +7,5 @@ build/
 *.spec
 .idea/
 .vscode/
+logs/
 *.log

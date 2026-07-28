@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+import re
 
 
 DEFAULT_LINE_ENDING = "\r\n"
@@ -42,6 +44,68 @@ def pad_meter_id(meter_id: str) -> str:
     if len(digits) > 12:
         raise ValueError("El medidor no puede tener más de 12 dígitos.")
     return digits.zfill(12)
+
+
+# Flags lectura multi-tarifa (RemoteCOM / Leitura Massiva)
+# F18=T1, F20=T2, F21=T3, F22=T4, F19=Total, F12=Fecha
+READ_FLAGS_MULTITARIFF = "182021221912"
+READ_FLAGS_MULTITARIFF_WITH_HEADER = "18202122191216"
+
+FLAG_LABELS = {
+    "18": "T1",
+    "20": "T2",
+    "21": "T3",
+    "22": "T4",
+    "19": "Total",
+    "12": "Fecha",
+    "16": "Cabecera",
+    "06": "Display",
+}
+
+
+def build_read_flags(
+    *,
+    t1: bool = True,
+    t2: bool = True,
+    t3: bool = True,
+    t4: bool = True,
+    total: bool = True,
+    datetime: bool = True,
+    header: bool = False,
+    display: bool = False,
+) -> str:
+    flags = ""
+    if t1:
+        flags += "18"
+    if t2:
+        flags += "20"
+    if t3:
+        flags += "21"
+    if t4:
+        flags += "22"
+    if total:
+        flags += "19"
+    if datetime:
+        flags += "12"
+    if header:
+        flags += "16"
+    if display:
+        flags += "06"
+    if not flags:
+        raise ValueError("Seleccione al menos un dato a leer.")
+    return flags
+
+
+def cmd_read_by_index(index: int, flags: str = READ_FLAGS_MULTITARIFF) -> str:
+    """Lectura por índice en el colector: R0000F03…, R0001F03…"""
+    if index < 0 or index > 9999:
+        raise ValueError("Índice fuera de rango (0-9999).")
+    return f"R{index:04d}F03{flags}"
+
+
+def cmd_multitariff_read(meter_id: str, flags: str = READ_FLAGS_MULTITARIFF) -> str:
+    """Lectura directa con T1-T4: R + medidor(12) + F03 + flags."""
+    return f"R{pad_meter_id(meter_id)}F03{flags}"
 
 
 def pad_header(header: str) -> str:
@@ -126,6 +190,12 @@ def cmd_set_clock(yymmddhhmmss: str) -> str:
     return f"C{digits}"
 
 
+def cmd_set_clock_now(when: Optional[datetime] = None) -> str:
+    """Arma C + AAMMDDHHMMSS con la hora actual (o la indicada)."""
+    dt = when or datetime.now()
+    return cmd_set_clock(dt.strftime("%y%m%d%H%M%S"))
+
+
 def cmd_restart_reading() -> str:
     """Comando K documentado: k=10100000."""
     return CMD_K_START_READING
@@ -140,6 +210,30 @@ def cmd_login() -> str:
 
 
 # --- Parsers -----------------------------------------------------------------
+
+@dataclass
+class MeterReading:
+    meter_id: str
+    flags: str
+    status: str
+    t1: Optional[float]
+    t2: Optional[float]
+    t3: Optional[float]
+    t4: Optional[float]
+    total: Optional[float]
+    datetime_raw: str
+    datetime_text: str
+    header: str
+    display_on: Optional[bool]
+    raw: str
+
+
+@dataclass
+class CollectorInfo:
+    meter_count: Optional[int]
+    amrsw: Optional[str]
+    raw: str
+
 
 @dataclass
 class DirectReadResult:
@@ -186,6 +280,95 @@ def parse_datetime_raw(raw12: str) -> str:
         digits[10:12],
     )
     return f"20{yy}-{mo}-{dd} {hh}:{mi}:{ss}"
+
+
+def parse_collector_info(raw: str) -> Optional[CollectorInfo]:
+    """Parsea respuesta del comando O (IDnum, AMRsw…)."""
+    text = raw.strip()
+    if not text:
+        return None
+    count_match = re.search(r"IDnum=N(\d+)", text, re.IGNORECASE)
+    amr_match = re.search(r"AMRsw=(\d+)", text, re.IGNORECASE)
+    count = int(count_match.group(1)) if count_match else None
+    amrsw = amr_match.group(1) if amr_match else None
+    if count is None and amrsw is None:
+        return None
+    return CollectorInfo(meter_count=count, amrsw=amrsw, raw=text)
+
+
+def _flag_digits(flags_field: str) -> List[str]:
+    """F03182021221912 -> ['18','20','21','22','19','12']"""
+    digits = "".join(ch for ch in flags_field if ch.isdigit())
+    if digits.startswith("03"):
+        digits = digits[2:]
+    chunks: List[str] = []
+    i = 0
+    while i < len(digits):
+        if i + 1 < len(digits) and digits[i : i + 2] in FLAG_LABELS:
+            chunks.append(digits[i : i + 2])
+            i += 2
+        else:
+            i += 1
+    return chunks
+
+
+def parse_meter_reading(raw: str) -> Optional[MeterReading]:
+    """
+  Parsea lectura simple o multi-tarifa.
+
+  Multi-tarifa (RemoteCOM):
+    000023988383 F03182021221912 00 T1 T2 T3 T4 Total Fecha
+    """
+    parts = raw.strip().split()
+    if len(parts) < 4:
+        return None
+
+    meter = parts[0]
+    flags_field = parts[1]
+    status = parts[2]
+    flag_list = _flag_digits(flags_field)
+    values = parts[3 : 3 + len(flag_list)]
+
+    data: Dict[str, str] = {}
+    for key, val in zip(flag_list, values):
+        data[key] = val
+
+    display_on: Optional[bool] = None
+    if status in ("00", "01"):
+        display_on = status == "01"
+
+    return MeterReading(
+        meter_id=meter,
+        flags=flags_field,
+        status=status,
+        t1=parse_reading_value(data["18"]) if "18" in data else None,
+        t2=parse_reading_value(data["20"]) if "20" in data else None,
+        t3=parse_reading_value(data["21"]) if "21" in data else None,
+        t4=parse_reading_value(data["22"]) if "22" in data else None,
+        total=parse_reading_value(data["19"]) if "19" in data else None,
+        datetime_raw=data.get("12", ""),
+        datetime_text=parse_datetime_raw(data["12"]) if "12" in data else "",
+        header=data.get("16", ""),
+        display_on=display_on,
+        raw=raw.strip(),
+    )
+
+
+def format_meter_reading_summary(reading: MeterReading) -> str:
+    parts = [f"Medidor {reading.meter_id}"]
+    if reading.t1 is not None:
+        parts.append(f"T1={reading.t1}")
+    if reading.t2 is not None:
+        parts.append(f"T2={reading.t2}")
+    if reading.t3 is not None:
+        parts.append(f"T3={reading.t3}")
+    if reading.t4 is not None:
+        parts.append(f"T4={reading.t4}")
+    if reading.total is not None:
+        parts.append(f"Total={reading.total}")
+    if reading.datetime_text:
+        parts.append(f"Fecha={reading.datetime_text}")
+    return " | ".join(parts)
 
 
 def parse_direct_read_response(raw: str) -> Optional[DirectReadResult]:
