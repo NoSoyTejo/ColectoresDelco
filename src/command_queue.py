@@ -14,6 +14,24 @@ OnBusy = Callable[[bool], None]
 
 CommandInput = Union[str, "QueuedCommand"]
 
+# Máximo de reenvíos del mismo comando tras Lock/UnLock (evita loops).
+MAX_UNLOCK_RETRIES = 2
+
+
+def command_accepts_soft_no(text: str) -> bool:
+    """
+    NO que no debe abortar el resto de la secuencia:
+    - QUIT: a menudo = ya detenido
+    - i: sin horarios polling
+    - PWR: Lock se maneja aparte
+    """
+    t = text.strip().lower()
+    if t == "quit" or t == "i":
+        return True
+    if t.startswith("pwr"):
+        return True
+    return False
+
 
 @dataclass
 class QueuedCommand:
@@ -22,6 +40,8 @@ class QueuedCommand:
     rx_timeout_ms: int = 0
     write_timeout_s: float = 3.0
     wait_rx: Optional[bool] = None  # None = usar el default de la secuencia
+    # None = auto (duro salvo soft_no); True/False fuerza el comportamiento.
+    abort_on_no: Optional[bool] = None
 
 
 class SerialCommandQueue:
@@ -56,6 +76,9 @@ class SerialCommandQueue:
         self._active_rx_timeout_ms = rx_timeout_ms
         self._send_gen = 0
         self._pending_wait_rx = False
+        self._abort_on_no = False
+        self._unlock_retries = 0
+        self._aborted = False
 
     @property
     def is_busy(self) -> bool:
@@ -68,6 +91,15 @@ class SerialCommandQueue:
     @property
     def last_response(self) -> str:
         return self._last_rx
+
+    @property
+    def is_waiting_rx(self) -> bool:
+        """True si la cola espera respuesta del comando en curso."""
+        return self._busy and self._waiting_rx
+
+    @property
+    def was_aborted(self) -> bool:
+        return self._aborted
 
     def _set_busy(self, value: bool) -> None:
         self._busy = value
@@ -108,6 +140,9 @@ class SerialCommandQueue:
         self._rx_lines = []
         self._waiting_rx = False
         self._active_rx_timeout_ms = self._rx_timeout_ms
+        self._abort_on_no = False
+        self._unlock_retries = 0
+        self._aborted = False
         if self._items:
             self._set_busy(True)
             self._on_log("INFO", f"Secuencia iniciada ({len(self._items)} comandos)")
@@ -124,9 +159,24 @@ class SerialCommandQueue:
         self._multiline_ms = 0
         self._rx_lines = []
         self._active_rx_timeout_ms = self._rx_timeout_ms
+        self._aborted = True
         if was_busy:
             self._set_busy(False)
             self._on_log("INFO", "Secuencia cancelada")
+
+    def _abort_remaining(self, reason: str) -> None:
+        """Descarta comandos pendientes y cierra la secuencia tras el paso actual."""
+        dropped = len(self._items)
+        self._items.clear()
+        self._aborted = True
+        if dropped:
+            self._on_log(
+                "WARN",
+                f"Secuencia detenida ({reason}). "
+                f"No se enviaran los {dropped} comando(s) siguientes.",
+            )
+        else:
+            self._on_log("WARN", f"Secuencia detenida ({reason}).")
 
     def on_rx(self, text: str) -> None:
         if not self._busy or not self._waiting_rx:
@@ -144,6 +194,7 @@ class SerialCommandQueue:
             self._waiting_rx = False
             self._multiline_ms = 0
             self._rx_lines = []
+            self._unlock_retries = 0
             self._schedule(self._pause_ms, self._send_next)
             return
 
@@ -151,6 +202,11 @@ class SerialCommandQueue:
             self._rx_lines.append(line)
             self._last_rx = "\n".join(self._rx_lines)
             self._rx_timer_gen += 1
+            # NO duro suelto: no esperar el timer multilinea (evita "secuencia en curso" largo).
+            if line.upper() == "NO" and self._abort_on_no and len(self._rx_lines) == 1:
+                gen = self._rx_timer_gen
+                self._complete_multiline_rx(gen)
+                return
             gen = self._rx_timer_gen
             self._schedule(self._multiline_ms, lambda: self._complete_multiline_rx(gen))
             return
@@ -159,7 +215,13 @@ class SerialCommandQueue:
         self._last_rx = line
         if self._on_step:
             self._on_step(self._last_cmd, self._last_rx)
+
+        # NO duro: no seguir con WAKE/ZOOM/etc. (evita cascadas confusas).
+        if line.upper() == "NO" and self._abort_on_no:
+            self._abort_remaining(f"{self._last_cmd!r} respondio NO")
+
         self._waiting_rx = False
+        self._unlock_retries = 0
         self._schedule(self._pause_ms, self._send_next)
 
     @staticmethod
@@ -173,9 +235,13 @@ class SerialCommandQueue:
             return
         if self._on_step:
             self._on_step(self._last_cmd, self._last_rx)
+        # Multilinea con solo "NO" (p.ej. O) también aborta si corresponde.
+        if self._last_rx.strip().upper() == "NO" and self._abort_on_no:
+            self._abort_remaining(f"{self._last_cmd!r} respondio NO")
         self._waiting_rx = False
         self._multiline_ms = 0
         self._rx_lines = []
+        self._unlock_retries = 0
         self._schedule(self._pause_ms, self._send_next)
 
     def on_unlock(self) -> None:
@@ -184,13 +250,53 @@ class SerialCommandQueue:
             return
         # Login exitoso: UnLock es la respuesta esperada, no hay que reenviar PWR666666.
         if self._last_cmd.strip().upper() == "PWR666666":
+            self._unlock_retries = 0
             self.on_rx("UnLock")
             return
-        self._on_log("INFO", f"Reintentando {self._last_cmd} tras unlock…")
+
+        if self._unlock_retries >= MAX_UNLOCK_RETRIES:
+            self._on_log(
+                "WARN",
+                f"Demasiados reintentos de {self._last_cmd!r} tras Lock/UnLock. "
+                "Secuencia cancelada — evite loops. Pulse Login y reintente la accion.",
+            )
+            self._abort_remaining("Lock/UnLock en bucle")
+            self._waiting_rx = False
+            self._schedule(self._pause_ms, self._send_next)
+            return
+
+        self._unlock_retries += 1
+        self._on_log(
+            "INFO",
+            f"Reintentando {self._last_cmd} tras unlock "
+            f"({self._unlock_retries}/{MAX_UNLOCK_RETRIES})…",
+        )
         self._rx_timer_gen += 1
         self._rx_lines = []
         self._pending_wait_rx = True
         self._dispatch_send(self._last_cmd, 3.0, after_retry=True)
+
+    def send_login_for_lock(self, login_cmd: str = "PWR666666") -> None:
+        """
+        Ante Lock: envía PWR666666 sin cancelar el comando en espera.
+        El UnLock posterior reintenta ese comando (on_unlock), o cierra el login.
+        """
+        if not self._busy or not self._waiting_rx:
+            return
+        self._rx_timer_gen += 1
+        self._rx_lines = []
+        self._pending_wait_rx = True
+        pending = self._last_cmd.strip()
+        if pending.upper() == login_cmd.strip().upper():
+            self._on_log("INFO", "Sigue Lock: reenviando PWR666666…")
+        else:
+            self._on_log(
+                "INFO",
+                f"Lock durante {pending!r}: enviando PWR666666 "
+                f"(luego se reintenta el comando, max {MAX_UNLOCK_RETRIES} veces)…",
+            )
+        # last_cmd se mantiene (QUIT, O, etc.) para que UnLock lo reintente.
+        self._dispatch_send(login_cmd, 2.0, after_retry=True)
 
     def on_send_failed(self) -> None:
         """Llamar si falló el envío: libera la cola para no quedar bloqueada."""
@@ -203,6 +309,7 @@ class SerialCommandQueue:
         self._multiline_ms = 0
         self._rx_lines = []
         self._active_rx_timeout_ms = self._rx_timeout_ms
+        self._aborted = True
         self._set_busy(False)
         self._on_log("WARN", "Secuencia interrumpida por error de comunicación")
 
@@ -219,6 +326,9 @@ class SerialCommandQueue:
             self._complete_multiline_rx(gen)
             return
         self._on_log("WARN", f"Sin respuesta a {self._last_cmd!r} (timeout). Siguiente…")
+        # Timeout en comando duro: no seguir ciegamente (p.ej. WAKE sin respuesta → no ZOOM).
+        if self._abort_on_no:
+            self._abort_remaining(f"timeout en {self._last_cmd!r}")
         self._waiting_rx = False
         self._multiline_ms = 0
         self._rx_lines = []
@@ -235,6 +345,10 @@ class SerialCommandQueue:
         self._multiline_ms = item.multiline_ms
         self._active_rx_timeout_ms = item.rx_timeout_ms or self._rx_timeout_ms
         self._rx_lines = []
+        if item.abort_on_no is None:
+            self._abort_on_no = not command_accepts_soft_no(item.text)
+        else:
+            self._abort_on_no = bool(item.abort_on_no)
         wait = self._wait_rx_default if item.wait_rx is None else item.wait_rx
         self._pending_wait_rx = wait
         write_to = item.write_timeout_s if item.write_timeout_s > 0 else 3.0
@@ -280,6 +394,9 @@ class SerialCommandQueue:
         self._multiline_ms = 0
         self._rx_lines = []
         self._set_busy(False)
-        self._on_log("INFO", "Secuencia finalizada")
+        if self._aborted:
+            self._on_log("INFO", "Secuencia finalizada (detenida por error)")
+        else:
+            self._on_log("INFO", "Secuencia finalizada")
         if self._on_done:
             self._on_done()

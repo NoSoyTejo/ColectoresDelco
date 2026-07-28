@@ -49,7 +49,7 @@ La app **espera respuesta** entre cada paso de estas secuencias.
 | 5 | Login | `PWR666666` (auto al conectar / ante lock) |
 | 6 | Versión | `VER` (`CCE16`=v1, `SLD16`=v2) |
 | 7 | Cantidad medidores | `QUIT` → `O` (IDnum, AMRsw…) |
-| 8 | Reiniciar ciclo K | `QUIT` → `O` → si AMRsw≠10100000: `k=10100000` → `O` → `QUIT` → `WAKE` → `ZOOM` |
+| 8 | Reiniciar ciclo K | `QUIT` → `O` (leer AMRsw e *inferir*) → si ≠`10100000`: `k=10100000` → `O` → `QUIT` → `WAKE` → `ZOOM` |
 | 9 | Forzar lecturas | `QUIT` → `WAKE` → `ZOOM` |
 | 10 | Ver horarios | `QUIT` → `i` (`NO` = sin horarios) |
 | 11 | Insertar horarios | Manual no define el comando. App prueba `I`+HHMM+HHMM (validar en hardware). |
@@ -73,9 +73,12 @@ En la UI: Download (`i`) muestra el total + franjas; botón **3 franjas (§10)**
 
 ### Notas de comportamiento
 
-- **K responde NO**: suele significar que AMRsw ya es `10100000` (K no necesario).
-- **i responde NO**: colector sin horarios polling (`Total de poolings: 0`).
-- **WAKE / ROUTERERROR**: enviar `QUIT` primero.
+- **§8 / AMRsw**: el manual muestra `10000000` solo como *ejemplo*. Con lo que devuelva `O` se infiere: si es `10100000` no hace falta `k=`; cualquier otro valor (p.ej. `00000000`) → enviar `k=10100000`.
+- **K / O / WAKE / ZOOM / A / E responden NO**: la secuencia **se detiene** (no sigue con el siguiente comando). No reintentar en bucle.
+- **QUIT responde NO**: a menudo ya estaba detenido; no reenviar QUIT en bucle.
+- **i responde NO**: sin horarios (informativo).
+- **Lock**: login automático `PWR666666` (máx. 3); reintento del comando tras UnLock (máx. 2).
+- **WAKE / ROUTERERROR**: un solo `QUIT` y luego `QUIT→WAKE→ZOOM`.
 
 ### Interpretación lectura directa
 

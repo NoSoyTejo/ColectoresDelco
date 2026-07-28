@@ -47,14 +47,15 @@ if TYPE_CHECKING:
     from ui.app_window import AppWindow
 
 
-WAKE_SLOW = QueuedCommand(CMD_WAKE, rx_timeout_ms=20000, write_timeout_s=2.0, wait_rx=True)
-ZOOM_CMD = QueuedCommand(CMD_ZOOM, rx_timeout_ms=10000, write_timeout_s=2.0, wait_rx=True)
+WAKE_SLOW = QueuedCommand(CMD_WAKE, rx_timeout_ms=20000, write_timeout_s=2.0, wait_rx=True, abort_on_no=True)
+ZOOM_CMD = QueuedCommand(CMD_ZOOM, rx_timeout_ms=10000, write_timeout_s=2.0, wait_rx=True, abort_on_no=True)
 POLLING_DOWNLOAD = QueuedCommand(
-    cmd_download_polling(),
+    CMD_POLLING_SCHEDULE,
     multiline_ms=2500,
     rx_timeout_ms=12000,
     write_timeout_s=2.0,
     wait_rx=True,
+    abort_on_no=False,  # NO = sin horarios (informativo)
 )
 
 

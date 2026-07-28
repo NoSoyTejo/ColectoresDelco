@@ -18,6 +18,9 @@ if (-not (Test-Path $VenvPy)) {
     --paths (Join-Path $Root "src") `
     --collect-all customtkinter `
     --hidden-import serial.tools.list_ports `
+    --hidden-import tcp_client `
+    --hidden-import polling_schedule `
+    --hidden-import command_queue `
     (Join-Path $Root "src\main.py")
 
 Write-Host ""

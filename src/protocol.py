@@ -26,8 +26,10 @@ CMD_DELETE_BASE = "DEL"
 
 # Reinicio de ciclo de lectura (AMRsw debe quedar en 10100000)
 CMD_K_START_READING = "k=10100000"
+# Meta del ciclo de lectura (§8). El manual usa AMRsw=10000000 solo como *ejemplo*
+# de “mal configurado”; cualquier otro valor distinto de AMRSW_OK implica enviar k=.
 AMRSW_OK = "10100000"
-AMRSW_BAD = "10000000"
+AMRSW_BAD_EXAMPLE = "10000000"  # ejemplo del manual, no el único valor “malo”
 
 # Lectura directa (Comados.doc §1): F18 lectura + F12 fecha. Cabecera/display obsoletos.
 READ_FLAGS_BASIC = "1812"
@@ -210,6 +212,18 @@ def cmd_set_clock_now(when: Optional[datetime] = None) -> str:
 def cmd_restart_reading() -> str:
     """Comando K documentado: k=10100000."""
     return CMD_K_START_READING
+
+
+def amrsw_needs_k(amrsw: Optional[str]) -> bool:
+    """
+    §8: con el AMRsw que devuelve O inferimos la acción.
+    - Meta: 10100000 → no hace falta k=
+    - Cualquier otro valor (ej. 10000000 del manual, 00000000, etc.) → enviar k=
+    - Sin valor → intentar k= (no sabemos el estado)
+    """
+    if not amrsw:
+        return True
+    return amrsw.strip() != AMRSW_OK
 
 
 def cmd_version() -> str:
@@ -459,7 +473,7 @@ def parse_response(raw: str) -> Optional[str]:
 def describe_lock_state(raw: str) -> Optional[str]:
     low = raw.strip().lower()
     if is_lock_response(raw):
-        return "Colector bloqueado: enviar login PWR666666"
+        return "Colector bloqueado (Lock): la app enviara PWR666666 automaticamente."
     if is_unlock_response(raw):
         return "Colector desbloqueado (login OK)"
     return None
@@ -478,41 +492,75 @@ def describe_status_response(raw: str, last_command: str = "") -> Optional[str]:
         return None
     if "routererror" in low or "lasterror_router" in low:
         return (
-            "WAKE rechazado (ROUTERERROR). Use QUIT, espere OK, "
-            "luego QUIT → WAKE → ZOOM. Si persiste, reinicie USB."
+            "WAKE rechazado (ROUTERERROR). Pare. "
+            "Luego: Login si hace falta, un solo QUIT, y boton QUIT→WAKE→ZOOM."
         )
     if low.startswith("no") and ("error" in low or "last" in low):
         return (
-            f"Comando rechazado: {text}. Detenga con QUIT y reintente WAKE + ZOOM."
+            f"Comando rechazado: {text}. Pare la secuencia. "
+            "Login + QUIT, luego reintente la accion una sola vez."
         )
     if text.upper() == "NO":
+        # QUIT + NO: suele indicar que ya estaba detenido (no reintentar QUIT).
+        if cmd_low == "quit":
+            return (
+                "QUIT respondio NO (probablemente ya detenido). "
+                "No reenvie QUIT en bucle; continue con el siguiente paso."
+            )
         # Comando i (ver horarios): "NO" = sin franjas, no es error.
         if cmd_low == "i":
             return (
-                "Download: el colector no tiene horarios polling (respuesta NO). "
-                "Use 'Día completo' + Upload solo si el colector acepta insertar; "
-                "§11 exige que no haya horarios previos (ya está vacío)."
+                "Download: sin horarios polling (NO). "
+                "Es informativo — no es un fallo de comunicacion."
             )
         # Upload IHHMMHHMM
         if cmd_low.startswith("i") and len(cmd) > 1:
             return (
-                f"Upload rechazado (NO) al comando {cmd}. "
-                "El manual (§11) no documenta el formato exacto; "
-                "el colector debe estar sin horarios previos."
+                f"Upload {cmd} respondio NO. Pare. "
+                "Vacie horarios en el colector (si aplica) y suba una sola vez."
+            )
+        if cmd_low.startswith("pwr"):
+            return (
+                "PWR666666 respondio NO (no hubo UnLock). "
+                "No es login OK. Pare — no encadene QUIT/O/K. "
+                "Desconecte y Conecte, o espere 2 s y Login una sola vez."
+            )
+        if cmd_low == "o":
+            return (
+                "O respondio NO: sin AMRsw/IDnum. "
+                "Pare. Primero necesita UnLock real (no NO al PWR). "
+                "Luego QUIT → O (una vez). No pulse K hasta ver AMRsw."
             )
         if cmd_low == "wake":
-            return "WAKE rechazado (NO). Envíe QUIT (OK) y luego QUIT → WAKE → ZOOM."
+            return (
+                "WAKE respondio NO. Pare (no encadene ZOOM). "
+                "Un QUIT y luego boton QUIT→WAKE→ZOOM."
+            )
         if cmd_low == "zoom":
-            return "ZOOM rechazado (NO). Envíe QUIT y luego QUIT → WAKE → ZOOM."
+            return (
+                "ZOOM respondio NO. Pare. "
+                "Un QUIT y luego boton QUIT→WAKE→ZOOM."
+            )
         if cmd_low.startswith("k="):
             return (
-                "K respondio NO: a menudo significa que AMRsw ya esta en 10100000 "
-                "(K no era necesario), o que el colector no estaba en QUIT. "
-                "Use el boton K: primero lee AMRsw con O y solo envia k= si hace falta."
+                "k=10100000 respondio NO (K rechazado). Pare. "
+                "Verifique AMRsw con O; no reenvie k= en bucle."
             )
+        if cmd_low.startswith("a") or cmd_low.startswith("e") or cmd_low.startswith("sgxf"):
+            return (
+                f"{cmd!r} respondio NO. Secuencia de mantenimiento detenida. "
+                "Login + QUIT y reintente esa accion una sola vez."
+            )
+        if cmd_low == "del":
+            return "DEL respondio NO. No reintente en bucle; verifique QUIT/Login."
+        if cmd_low == "ver":
+            return "VER respondio NO. Login + QUIT y pruebe VER otra vez."
         if cmd:
-            return f"Comando {cmd!r} rechazado (NO). Envíe QUIT y reintente."
-        return "Comando rechazado (NO). Envíe QUIT y reintente."
+            return (
+                f"{cmd!r} respondio NO. Secuencia puede detenerse. "
+                "No reintente el mismo comando en bucle."
+            )
+        return "Respuesta NO del colector."
     return None
 
 

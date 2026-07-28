@@ -1,6 +1,6 @@
 # Proyecto Colectores
 
-Software de escritorio Windows para interrogar colectores conectados por cable **RS232 → USB** (puerto `COMx`). Reemplazo propio de herramientas tipo remote-com.
+Software de escritorio Windows para interrogar colectores por cable **RS232 → USB** (`COMx`) o por **IP (TCP)**. Reemplazo propio de herramientas tipo remote-com.
 
 ## Requisitos
 
@@ -35,8 +35,8 @@ O manualmente:
 python src\main.py
 ```
 
-1. Conectar el cable USB → verificar que aparece un `COMx` en **Refrescar**
-2. Elegir puerto y baud rate (ver `docs/protocolo.md`)
+1. Elegir modo **COM** (cable) o **IP** (TCP)
+2. COM: puerto + baud · IP: host + puerto (default 4001)
 3. **Conectar**
 4. Usar los botones del panel o escribir un comando y **Enviar**
 5. Revisar respuestas en el historial (`TX` = enviado, `RX` = recibido)
@@ -65,6 +65,7 @@ ProyectoColectores/
     app_paths.py         # rutas dev / .exe
     session_log.py       # log a archivo
     serial_client.py
+    tcp_client.py      # transporte IP/TCP
     protocol.py
     ui/app_window.py
   requirements.txt
@@ -72,10 +73,10 @@ ProyectoColectores/
 
 ## Ensayo con hardware
 
-1. Administrador de dispositivos → Puertos (COM y LPT) → anotar `COMx`
-2. Abrir la app, seleccionar ese puerto
+1. **COM:** Administrador de dispositivos → anotar `COMx` → Refrescar → Conectar
+2. **IP:** modo IP → host + puerto TCP → Conectar (requiere colector/gateway en red)
 3. Probar un comando documentado (versión o lectura)
-4. Si no hay respuesta: probar otro baud / fin de línea (`CR`, `LF`, `CR+LF`)
+4. Si no hay respuesta: probar otro baud / fin de línea (`CR`, `LF`, `CR+LF`) o otro puerto TCP
 
 ## Fase 2 — comandos documentados
 

@@ -8,7 +8,7 @@
   "line_ending": "\r\n",
   "last_meter": "",
   "last_header": "",
-  "connection_mode": "com",
-  "tcp_host": "",
-  "tcp_port": 4001
+  "connection_mode": "tcp",
+  "tcp_host": "10.118.163.46",
+  "tcp_port": 9911
 }

@@ -34,6 +34,7 @@ from protocol import (
     cmd_forced_refresh,
     cmd_multitariff_read,
     cmd_restart_reading,
+    amrsw_needs_k,
     describe_lock_state,
     describe_status_response,
     format_command,
@@ -103,8 +104,8 @@ class AppWindow(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Proyecto Colectores")
-        self.geometry("1180x860")
-        self.minsize(1000, 720)
+        self.geometry("1120x740")
+        self.minsize(960, 620)
 
         ctk.set_appearance_mode("System")
         ctk.set_default_color_theme("blue")
@@ -134,6 +135,9 @@ class AppWindow(ctk.CTk):
         )
         self._last_error_msg = ""
         self._auto_login_pending = False
+        self._login_lock_retries = 0
+        self._login_ok = False
+        self._login_retry_after_id: Optional[str] = None
         self._status_idle = "Desconectado — elija COM o IP y pulse Conectar"
 
         self._build_ui()
@@ -163,7 +167,6 @@ class AppWindow(ctk.CTk):
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(3, weight=1)
-        self.grid_rowconfigure(4, weight=1)
 
         header = ctk.CTkLabel(
             self,
@@ -178,7 +181,7 @@ class AppWindow(ctk.CTk):
 
         subtitle = ctk.CTkLabel(
             title_row,
-            text="Comandos según documentación Delco (lectura, login, medidores, K, etc.)",
+            text="Cable COM o IP (TCP) · comandos Delco (lectura, login, medidores, K…)",
             font=ctk.CTkFont(size=13),
             text_color=("gray30", "gray70"),
             anchor="w",
@@ -189,99 +192,141 @@ class AppWindow(ctk.CTk):
             row=0, column=1, padx=(8, 0)
         )
 
-        # --- Conexión ---
+        # --- Conexión (arriba, ancho completo) ---
         conn = ctk.CTkFrame(self)
         conn.grid(row=2, column=0, padx=16, pady=8, sticky="ew")
         self._conn_frame = conn
-        for i in range(10):
-            conn.grid_columnconfigure(i, weight=0)
-        conn.grid_columnconfigure(2, weight=1)
+        conn.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(conn, text="Modo").grid(row=0, column=0, padx=(12, 4), pady=(12, 4), sticky="w")
+        top = ctk.CTkFrame(conn, fg_color="transparent")
+        top.grid(row=0, column=0, padx=10, pady=(10, 4), sticky="ew")
+
+        ctk.CTkLabel(top, text="Modo").pack(side="left", padx=(0, 6))
         saved_mode = str(self.settings.get("connection_mode", "com")).lower()
         self.mode_var = ctk.StringVar(value="IP" if saved_mode == "tcp" else "COM")
         self.mode_seg = ctk.CTkSegmentedButton(
-            conn,
+            top,
             values=["COM", "IP"],
             variable=self.mode_var,
             command=self._on_mode_change,
             width=120,
         )
-        self.mode_seg.grid(row=0, column=1, padx=4, pady=(12, 4), sticky="w")
+        self.mode_seg.pack(side="left", padx=(0, 16))
 
-        # Fila COM
-        self._com_widgets: list = []
-        self.lbl_port = ctk.CTkLabel(conn, text="Puerto COM")
-        self.lbl_port.grid(row=1, column=0, padx=(12, 4), pady=(4, 12), sticky="w")
-        self.port_var = ctk.StringVar(value="")
-        self.port_menu = ctk.CTkOptionMenu(conn, variable=self.port_var, values=["(sin puertos)"])
-        self.port_menu.grid(row=1, column=1, columnspan=2, padx=4, pady=(4, 12), sticky="ew")
-        self.btn_refresh = ctk.CTkButton(conn, text="Refrescar", width=90, command=self._refresh_ports)
-        self.btn_refresh.grid(row=1, column=3, padx=4, pady=(4, 12))
-        self.lbl_baud = ctk.CTkLabel(conn, text="Velocidad")
-        self.lbl_baud.grid(row=1, column=4, padx=(12, 4), pady=(4, 12))
-        self.baud_var = ctk.StringVar(value="9600")
-        self.baud_menu = ctk.CTkOptionMenu(conn, variable=self.baud_var, values=self.BAUD_OPTIONS, width=100)
-        self.baud_menu.grid(row=1, column=5, padx=4, pady=(4, 12))
-        self._com_widgets = [
-            self.lbl_port,
-            self.port_menu,
-            self.btn_refresh,
-            self.lbl_baud,
-            self.baud_menu,
-        ]
-
-        # Fila IP
-        self._ip_widgets: list = []
-        self.lbl_host = ctk.CTkLabel(conn, text="Host / IP")
-        self.lbl_host.grid(row=1, column=0, padx=(12, 4), pady=(4, 12), sticky="w")
-        self.host_var = ctk.StringVar(value=str(self.settings.get("tcp_host") or ""))
-        self.host_entry = ctk.CTkEntry(
-            conn, textvariable=self.host_var, placeholder_text="ej. 192.168.1.50", width=180
-        )
-        self.host_entry.grid(row=1, column=1, columnspan=2, padx=4, pady=(4, 12), sticky="ew")
-        self.lbl_tcp_port = ctk.CTkLabel(conn, text="Puerto TCP")
-        self.lbl_tcp_port.grid(row=1, column=3, padx=(12, 4), pady=(4, 12))
-        self.tcp_port_var = ctk.StringVar(value=str(self.settings.get("tcp_port") or DEFAULT_TCP_PORT))
-        self.tcp_port_entry = ctk.CTkEntry(conn, textvariable=self.tcp_port_var, width=80)
-        self.tcp_port_entry.grid(row=1, column=4, padx=4, pady=(4, 12), sticky="w")
-        self._ip_widgets = [
-            self.lbl_host,
-            self.host_entry,
-            self.lbl_tcp_port,
-            self.tcp_port_entry,
-        ]
-
-        ctk.CTkLabel(conn, text="Fin de línea").grid(row=1, column=6, padx=(12, 4), pady=(4, 12))
+        ctk.CTkLabel(top, text="Fin de línea").pack(side="left", padx=(0, 6))
         self.ending_var = ctk.StringVar(value=self._line_ending_label)
         self.ending_menu = ctk.CTkOptionMenu(
-            conn,
+            top,
             variable=self.ending_var,
             values=list(self.ENDING_OPTIONS.keys()),
-            width=140,
+            width=130,
         )
-        self.ending_menu.grid(row=1, column=7, padx=4, pady=(4, 12))
+        self.ending_menu.pack(side="left", padx=(0, 12))
 
-        self.btn_connect = ctk.CTkButton(conn, text="Conectar", width=110, command=self._toggle_connect)
-        self.btn_connect.grid(row=1, column=8, padx=(8, 4), pady=(4, 12))
+        self.btn_connect = ctk.CTkButton(top, text="Conectar", width=110, command=self._toggle_connect)
+        self.btn_connect.pack(side="right", padx=(8, 0))
         self.btn_cancel_seq = ctk.CTkButton(
-            conn,
+            top,
             text="Cancelar secuencia",
             width=140,
             fg_color=("gray70", "gray35"),
             command=self._cancel_sequence,
         )
-        self.btn_cancel_seq.grid(row=1, column=9, padx=(4, 12), pady=(4, 12))
+        self.btn_cancel_seq.pack(side="right", padx=4)
+
+        self.com_row = ctk.CTkFrame(conn, fg_color="transparent")
+        self.com_row.grid(row=1, column=0, padx=10, pady=4, sticky="ew")
+        self.com_row.grid_columnconfigure(1, weight=1)
+
+        self.lbl_port = ctk.CTkLabel(self.com_row, text="Puerto COM")
+        self.lbl_port.grid(row=0, column=0, padx=(0, 6), sticky="w")
+        self.port_var = ctk.StringVar(value="")
+        self.port_menu = ctk.CTkOptionMenu(self.com_row, variable=self.port_var, values=["(sin puertos)"])
+        self.port_menu.grid(row=0, column=1, padx=4, sticky="ew")
+        self.btn_refresh = ctk.CTkButton(self.com_row, text="Refrescar", width=90, command=self._refresh_ports)
+        self.btn_refresh.grid(row=0, column=2, padx=4)
+        self.lbl_baud = ctk.CTkLabel(self.com_row, text="Baud")
+        self.lbl_baud.grid(row=0, column=3, padx=(12, 6))
+        self.baud_var = ctk.StringVar(value="9600")
+        self.baud_menu = ctk.CTkOptionMenu(
+            self.com_row, variable=self.baud_var, values=self.BAUD_OPTIONS, width=100
+        )
+        self.baud_menu.grid(row=0, column=4, padx=4)
+
+        self.ip_row = ctk.CTkFrame(conn, fg_color="transparent")
+        self.ip_row.grid(row=1, column=0, padx=10, pady=4, sticky="ew")
+        self.ip_row.grid_columnconfigure(1, weight=1)
+
+        self.lbl_host = ctk.CTkLabel(self.ip_row, text="Host / IP")
+        self.lbl_host.grid(row=0, column=0, padx=(0, 6), sticky="w")
+        self.host_var = ctk.StringVar(value=str(self.settings.get("tcp_host") or ""))
+        self.host_entry = ctk.CTkEntry(
+            self.ip_row, textvariable=self.host_var, placeholder_text="ej. 192.168.1.50"
+        )
+        self.host_entry.grid(row=0, column=1, padx=4, sticky="ew")
+        self.lbl_tcp_port = ctk.CTkLabel(self.ip_row, text="Puerto TCP")
+        self.lbl_tcp_port.grid(row=0, column=2, padx=(12, 6))
+        self.tcp_port_var = ctk.StringVar(value=str(self.settings.get("tcp_port") or DEFAULT_TCP_PORT))
+        self.tcp_port_entry = ctk.CTkEntry(self.ip_row, textvariable=self.tcp_port_var, width=80)
+        self.tcp_port_entry.grid(row=0, column=3, padx=4, sticky="w")
+
+        self._com_widgets = [self.com_row]
+        self._ip_widgets = [self.ip_row]
 
         self.status_var = ctk.StringVar(value=self._status_idle)
         ctk.CTkLabel(conn, textvariable=self.status_var, anchor="w").grid(
-            row=2, column=0, columnspan=10, padx=12, pady=(0, 10), sticky="ew"
+            row=2, column=0, padx=12, pady=(4, 10), sticky="ew"
         )
         self._apply_mode_visibility()
 
-        # --- Pestañas ---
-        self.tabview = ctk.CTkTabview(self)
-        self.tabview.grid(row=3, column=0, padx=16, pady=8, sticky="nsew")
+        # --- Cuerpo: historial (izq) | trabajo (der) ---
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.grid(row=3, column=0, padx=16, pady=(0, 14), sticky="nsew")
+        body.grid_columnconfigure(0, weight=3)
+        body.grid_columnconfigure(1, weight=2)
+        body.grid_rowconfigure(0, weight=1)
+
+        left = ctk.CTkFrame(body)
+        left.grid(row=0, column=0, padx=(0, 8), pady=0, sticky="nsew")
+        left.grid_columnconfigure(0, weight=1)
+        left.grid_rowconfigure(1, weight=1)
+
+        log_header = ctk.CTkFrame(left, fg_color="transparent")
+        log_header.grid(row=0, column=0, padx=10, pady=(10, 4), sticky="ew")
+        log_header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            log_header,
+            text="Historial (TX / RX)",
+            font=ctk.CTkFont(weight="bold"),
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+        self.btn_clear = ctk.CTkButton(
+            log_header, text="Limpiar", width=80, command=self._clear_log
+        )
+        self.btn_clear.grid(row=0, column=1, padx=(8, 0))
+
+        self.log_box = ctk.CTkTextbox(left, font=ctk.CTkFont(family="Consolas", size=12))
+        self.log_box.grid(row=1, column=0, padx=10, pady=(0, 8), sticky="nsew")
+        self.log_box.configure(state="disabled")
+
+        send_frame = ctk.CTkFrame(left, fg_color="transparent")
+        send_frame.grid(row=2, column=0, padx=10, pady=(0, 10), sticky="ew")
+        send_frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(send_frame, text="Comando").grid(row=0, column=0, padx=(0, 6), pady=4)
+        self.cmd_var = ctk.StringVar(value="")
+        self.cmd_entry = ctk.CTkEntry(send_frame, textvariable=self.cmd_var)
+        self.cmd_entry.grid(row=0, column=1, padx=4, pady=4, sticky="ew")
+        self.cmd_entry.bind("<Return>", lambda _e: self._send_command())
+        self.btn_send = ctk.CTkButton(send_frame, text="Enviar", width=90, command=self._send_command)
+        self.btn_send.grid(row=0, column=2, padx=(4, 0), pady=4)
+
+        right = ctk.CTkFrame(body)
+        right.grid(row=0, column=1, padx=(8, 0), pady=0, sticky="nsew")
+        right.grid_columnconfigure(0, weight=1)
+        right.grid_rowconfigure(0, weight=1)
+
+        self.tabview = ctk.CTkTabview(right)
+        self.tabview.grid(row=0, column=0, padx=8, pady=8, sticky="nsew")
 
         tab_cmds = self.tabview.add("Comandos")
         tab_clock = self.tabview.add("Reloj")
@@ -291,12 +336,12 @@ class AppWindow(ctk.CTk):
         tab_cmds.grid_columnconfigure(0, weight=1)
         tab_cmds.grid_rowconfigure(0, weight=1)
 
-        cmds = ctk.CTkScrollableFrame(tab_cmds, label_text="Comandos según Comados.doc")
-        cmds.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        cmds = ctk.CTkScrollableFrame(tab_cmds, label_text="Opciones de trabajo")
+        cmds.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
         cmds.grid_columnconfigure(0, weight=1)
         cmds.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(cmds, text="Medidor (hasta 12 dígitos)").grid(
+        ctk.CTkLabel(cmds, text="Medidor (hasta 12 digitos)").grid(
             row=0, column=0, columnspan=2, padx=8, pady=(8, 2), sticky="w"
         )
         self.meter_var = ctk.StringVar(value=str(self.settings.get("last_meter") or ""))
@@ -312,47 +357,42 @@ class AppWindow(ctk.CTk):
             row=3, column=0, columnspan=2, padx=8, pady=(0, 8), sticky="ew"
         )
 
-        # §5, §9 — Login y flujo base
-        ctk.CTkLabel(cmds, text="1. Flujo base (QUIT / Login / WAKE / ZOOM)", font=ctk.CTkFont(weight="bold")).grid(
+        ctk.CTkLabel(cmds, text="1. Flujo base", font=ctk.CTkFont(weight="bold")).grid(
             row=4, column=0, columnspan=2, padx=8, pady=(8, 4), sticky="w"
         )
         self._cmd_btn(cmds, 5, 0, "QUIT (detener)", lambda: self._send_one(CMD_QUIT))
         self._cmd_btn(cmds, 5, 1, "Login PWR666666", lambda: self._send_one(CMD_LOGIN))
-        self._cmd_btn(cmds, 6, 0, "QUIT→WAKE→ZOOM", self._do_quit_wake_zoom)
-        self._cmd_btn(cmds, 6, 1, "Diagnóstico VER+O", self._do_quick_diag)
+        self._cmd_btn(cmds, 6, 0, "QUIT->WAKE->ZOOM", self._do_quit_wake_zoom)
+        self._cmd_btn(cmds, 6, 1, "Diagnostico VER+O", self._do_quick_diag)
 
-        # §1 lectura, §2 refresco
-        ctk.CTkLabel(cmds, text="2. Lectura y refresco (§1–§2)", font=ctk.CTkFont(weight="bold")).grid(
+        ctk.CTkLabel(cmds, text="2. Lectura y refresco", font=ctk.CTkFont(weight="bold")).grid(
             row=7, column=0, columnspan=2, padx=8, pady=(12, 4), sticky="w"
         )
-        self._cmd_btn(cmds, 8, 0, "Lectura R…F031812", self._do_direct_read)
-        self._cmd_btn(cmds, 8, 1, "Refresco SGXF…", self._do_refresh)
-        self._cmd_btn(cmds, 9, 0, "Lectura T1–T4", self._do_multitariff_read)
+        self._cmd_btn(cmds, 8, 0, "Lectura R...F031812", self._do_direct_read)
+        self._cmd_btn(cmds, 8, 1, "Refresco SGXF...", self._do_refresh)
+        self._cmd_btn(cmds, 9, 0, "Lectura T1-T4", self._do_multitariff_read)
 
-        # §3–§4 medidores
-        ctk.CTkLabel(cmds, text="3. Medidores (§3–§4, §13)", font=ctk.CTkFont(weight="bold")).grid(
+        ctk.CTkLabel(cmds, text="3. Medidores", font=ctk.CTkFont(weight="bold")).grid(
             row=10, column=0, columnspan=2, padx=8, pady=(12, 4), sticky="w"
         )
-        self._cmd_btn(cmds, 11, 0, "Agregar A…", self._do_add_meter)
-        self._cmd_btn(cmds, 11, 1, "Borrar E…", self._do_delete_meter)
-        self._cmd_btn(cmds, 12, 0, "Agregar CP4 (A…00)", self._do_add_individual)
+        self._cmd_btn(cmds, 11, 0, "Agregar A...", self._do_add_meter)
+        self._cmd_btn(cmds, 11, 1, "Borrar E...", self._do_delete_meter)
+        self._cmd_btn(cmds, 12, 0, "Agregar CP4 (A...00)", self._do_add_individual)
         self._cmd_btn(cmds, 12, 1, "DEL (borrar base)", self._do_delete_base)
 
-        # §6–§8 info
-        ctk.CTkLabel(cmds, text="4. Información (§6–§8)", font=ctk.CTkFont(weight="bold")).grid(
+        ctk.CTkLabel(cmds, text="4. Informacion", font=ctk.CTkFont(weight="bold")).grid(
             row=13, column=0, columnspan=2, padx=8, pady=(12, 4), sticky="w"
         )
-        self._cmd_btn(cmds, 14, 0, "VER (versión)", lambda: self._send_one(CMD_VERSION))
+        self._cmd_btn(cmds, 14, 0, "VER (version)", lambda: self._send_one(CMD_VERSION))
         self._cmd_btn(cmds, 14, 1, "O (cant. medidores)", self._do_count_meters)
         self._cmd_btn(cmds, 15, 0, "K (revisa AMRsw)", self._do_restart_k)
-        self._cmd_btn(cmds, 15, 1, "i (horarios) → pestaña Reloj", lambda: self.tabview.set("Reloj"))
+        self._cmd_btn(cmds, 15, 1, "i -> Reloj", lambda: self.tabview.set("Reloj"))
 
         note = ctk.CTkLabel(
             cmds,
-            text="Según Comados.doc: casi todo usa QUIT → comando → WAKE → ZOOM. "
-            "Cabecera/display están obsoletos. Horarios y reloj: pestaña Reloj. "
-            "Conexión: cable COM o IP (TCP experimental).",
-            wraplength=420,
+            text="Flujo tipico: QUIT -> comando -> WAKE -> ZOOM. "
+            "Horarios/reloj en pestana Reloj. Conexion: COM o IP.",
+            wraplength=360,
             justify="left",
             text_color=("gray40", "gray60"),
         )
@@ -372,38 +412,6 @@ class AppWindow(ctk.CTk):
         self.meters_tab.pack(fill="both", expand=True)
         self.bulk_tab = BulkLoadTab(tab_bulk, self)
         self.bulk_tab.pack(fill="both", expand=True)
-
-        # --- Log compartido ---
-        log_frame = ctk.CTkFrame(self)
-        log_frame.grid(row=4, column=0, padx=16, pady=8, sticky="nsew")
-        log_frame.grid_columnconfigure(0, weight=1)
-        log_frame.grid_rowconfigure(1, weight=1)
-
-        ctk.CTkLabel(
-            log_frame,
-            text="Historial (TX = enviado, RX = respuesta)",
-            font=ctk.CTkFont(weight="bold"),
-        ).grid(row=0, column=0, padx=12, pady=(10, 4), sticky="w")
-        self.log_box = ctk.CTkTextbox(log_frame, font=ctk.CTkFont(family="Consolas", size=13))
-        self.log_box.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="nsew")
-        self.log_box.configure(state="disabled")
-
-        # --- Envío libre ---
-        send_frame = ctk.CTkFrame(self)
-        send_frame.grid(row=5, column=0, padx=16, pady=(0, 14), sticky="ew")
-        send_frame.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(send_frame, text="Comando libre").grid(row=0, column=0, padx=(12, 4), pady=12)
-        self.cmd_var = ctk.StringVar(value="")
-        self.cmd_entry = ctk.CTkEntry(send_frame, textvariable=self.cmd_var)
-        self.cmd_entry.grid(row=0, column=1, padx=4, pady=12, sticky="ew")
-        self.cmd_entry.bind("<Return>", lambda _e: self._send_command())
-
-        self.btn_send = ctk.CTkButton(send_frame, text="Enviar", width=100, command=self._send_command)
-        self.btn_send.grid(row=0, column=2, padx=4, pady=12)
-
-        self.btn_clear = ctk.CTkButton(send_frame, text="Limpiar historial", width=130, command=self._clear_log)
-        self.btn_clear.grid(row=0, column=3, padx=(4, 12), pady=12)
 
     def _cmd_btn(self, parent: Any, row: int, col: int, text: str, command: Any) -> None:
         ctk.CTkButton(parent, text=text, command=command).grid(
@@ -567,6 +575,7 @@ class AppWindow(ctk.CTk):
             self.status_var.set(self._status_idle)
 
     def _cancel_sequence(self) -> None:
+        self._reset_login_state()
         if self.command_queue.is_busy:
             self.command_queue.cancel()
             self._append_log("INFO", "Secuencia cancelada por el usuario")
@@ -588,31 +597,157 @@ class AppWindow(ctk.CTk):
             self._ui_queue.put(("write_fail", str(exc)))
             return False
 
+    def _reset_login_state(self) -> None:
+        self._auto_login_pending = False
+        self._login_lock_retries = 0
+        self._login_ok = False
+        if self._login_retry_after_id is not None:
+            try:
+                self.after_cancel(self._login_retry_after_id)
+            except Exception:
+                pass
+            self._login_retry_after_id = None
+
     def _send_initial_login(self) -> None:
         if not self.client.is_connected or self.command_queue.is_busy:
             return
+        self._reset_login_state()
         self._append_log("INFO", "Login inicial PWR666666…")
         self._auto_login_pending = True
+
+        def after_login() -> None:
+            self._auto_login_pending = False
+            if not self.client.is_connected or self.command_queue.is_busy:
+                return
+            last = (self.command_queue.last_response or "").strip().lower()
+            unlocked = self._login_ok or ("unlock" in last)
+            if not unlocked:
+                self._append_log(
+                    "WARN",
+                    "Login no completo (no hubo UnLock). "
+                    f"Ultima respuesta: {self.command_queue.last_response!r}. "
+                    "No se envia QUIT automatico. "
+                    "Si PWR responde NO, Desconecte/Conecte o pulse Login una vez; "
+                    "si el colector ya estaba libre, pruebe O directamente.",
+                )
+                return
+            self._login_ok = True
+            self._append_log(
+                "INFO",
+                "Tras login OK: enviando QUIT para modo mantenimiento…",
+            )
+            try:
+                self.command_queue.start(
+                    [QueuedCommand(CMD_QUIT, wait_rx=True, rx_timeout_ms=8000, write_timeout_s=2.0)],
+                    wait_rx=True,
+                )
+            except RuntimeError:
+                pass
+
         try:
             self.command_queue.start(
-                [QueuedCommand(CMD_LOGIN, wait_rx=True, rx_timeout_ms=5000, write_timeout_s=2.0)],
+                [QueuedCommand(CMD_LOGIN, wait_rx=True, rx_timeout_ms=10000, write_timeout_s=2.0)],
                 wait_rx=True,
+                on_done=after_login,
             )
         except RuntimeError:
             self._auto_login_pending = False
 
+    def _fail_login_lock_loop(self) -> None:
+        """Corta el spam de PWR cuando el colector solo responde Lock."""
+        self._append_log(
+            "WARN",
+            "Lock persistente: PWR666666 no produce UnLock. "
+            "Pare (no se reenvia login en bucle). "
+            "Espere 2-3 s, pulse Login una vez, o Desconectar/Conectar. "
+            "Si sigue Lock, revise IP/puerto o clave del colector.",
+        )
+        self._auto_login_pending = False
+        if self._login_retry_after_id is not None:
+            try:
+                self.after_cancel(self._login_retry_after_id)
+            except Exception:
+                pass
+            self._login_retry_after_id = None
+        if self.command_queue.is_busy:
+            self.command_queue.cancel()
+
     def _auto_login_on_lock(self) -> None:
-        if not self.client.is_connected or self._auto_login_pending or self.command_queue.is_busy:
+        """
+        Ante Lock: reenviar PWR666666 con pausa (no en el mismo instante).
+        Si el comando en curso ya es login, esperar UnLock; reintentar con delay.
+        """
+        if not self.client.is_connected:
             return
-        self._append_log("INFO", "Login automático PWR666666…")
+        # Ya hay un reintento programado: no spamear.
+        if self._login_retry_after_id is not None:
+            return
+
+        if self._login_lock_retries >= 3:
+            self._fail_login_lock_loop()
+            return
+
+        self._login_lock_retries += 1
         self._auto_login_pending = True
-        try:
-            self.command_queue.start(
-                [QueuedCommand(CMD_LOGIN, wait_rx=True, rx_timeout_ms=5000, write_timeout_s=2.0)],
-                wait_rx=True,
+        attempt = self._login_lock_retries
+        delay_ms = 1200 * attempt  # 1.2s, 2.4s, 3.6s
+
+        waiting_login = (
+            self.command_queue.is_waiting_rx
+            and self.command_queue.last_command.strip().upper() == CMD_LOGIN.upper()
+        )
+        waiting_other = self.command_queue.is_waiting_rx and not waiting_login
+
+        def _do_retry() -> None:
+            self._login_retry_after_id = None
+            if not self.client.is_connected:
+                return
+            if waiting_login or (
+                self.command_queue.is_waiting_rx
+                and self.command_queue.last_command.strip().upper() == CMD_LOGIN.upper()
+            ):
+                self._append_log(
+                    "INFO",
+                    f"Reintento login {attempt}/3 tras Lock (espera {delay_ms} ms)…",
+                )
+                self.command_queue.send_login_for_lock(CMD_LOGIN)
+                return
+            if self.command_queue.is_waiting_rx:
+                self._append_log(
+                    "INFO",
+                    f"Lock: enviando PWR666666 (intento {attempt}/3, tras {delay_ms} ms)…",
+                )
+                self.command_queue.send_login_for_lock(CMD_LOGIN)
+                return
+            if self.command_queue.is_busy:
+                self._append_log("WARN", "Cola ocupada: no se pudo reenviar login")
+                self._auto_login_pending = False
+                return
+            self._append_log("INFO", f"Login automatico PWR666666 (intento {attempt}/3)…")
+            try:
+                self.command_queue.start(
+                    [QueuedCommand(CMD_LOGIN, wait_rx=True, rx_timeout_ms=10000, write_timeout_s=2.0)],
+                    wait_rx=True,
+                )
+            except RuntimeError:
+                self._auto_login_pending = False
+
+        if waiting_login:
+            self._append_log(
+                "INFO",
+                f"PWR666666 respondio Lock — esperando {delay_ms} ms antes de reintentar "
+                f"({attempt}/3)…",
             )
-        except RuntimeError:
-            self._auto_login_pending = False
+        elif waiting_other:
+            self._append_log(
+                "INFO",
+                f"Lock durante {self.command_queue.last_command!r} — "
+                f"login en {delay_ms} ms ({attempt}/3)…",
+            )
+        else:
+            self._append_log("INFO", f"Lock recibido — login en {delay_ms} ms ({attempt}/3)…")
+
+        self._login_retry_after_id = self.after(delay_ms, _do_retry)
 
     def _on_connection_lost(self, reason: str) -> None:
         if reason == self._last_error_msg:
@@ -637,14 +772,19 @@ class AppWindow(ctk.CTk):
         if self.command_queue.is_busy:
             self._append_log("ERR", "Hay una secuencia en curso. Espere o pulse Cancelar secuencia.")
             return
+        if command.strip().upper() == CMD_LOGIN.upper():
+            self._reset_login_state()
+            self._auto_login_pending = True
         self.cmd_var.set(command)
         try:
             self.command_queue.start(
-                [QueuedCommand(command, wait_rx=True, rx_timeout_ms=8000, write_timeout_s=2.0)],
+                [QueuedCommand(command, wait_rx=True, rx_timeout_ms=10000, write_timeout_s=2.0)],
                 wait_rx=True,
             )
         except RuntimeError as exc:
             self._append_log("ERR", str(exc))
+            if command.strip().upper() == CMD_LOGIN.upper():
+                self._auto_login_pending = False
 
     def _send_many(
         self,
@@ -773,9 +913,10 @@ class AppWindow(ctk.CTk):
 
     def _do_restart_k(self) -> None:
         """
-        §8 Comados.doc:
-          QUIT → O (ver AMRsw) → si es 10000000 enviar k=10100000 → O → WAKE → ZOOM.
-        Si AMRsw ya es 10100000, K no hace falta (a veces responde NO).
+        §8 Comados.doc — leer AMRsw con O e *inferir*:
+          - Si ya es 10100000 → no hace falta k=; QUIT → WAKE → ZOOM
+          - Cualquier otro valor (10000000 es solo ejemplo del manual) →
+            QUIT → k=10100000 → O → QUIT → WAKE → ZOOM
         """
         from ui.extra_tabs import WAKE_SLOW, ZOOM_CMD
 
@@ -786,58 +927,69 @@ class AppWindow(ctk.CTk):
             self._append_log("ERR", "Hay una secuencia en curso. Espere o pulse Cancelar secuencia.")
             return
 
-        self._append_log("INFO", "K (§8): QUIT + O para leer AMRsw…")
+        self._append_log("INFO", "K (§8): QUIT + O para leer AMRsw e inferir si hace falta k=…")
+        self._k_o_retry = False
 
-        def after_amr_check() -> None:
-            raw = self.command_queue.last_response
+        def _extract_amr(raw: str) -> Optional[str]:
             info = parse_collector_info(raw)
-            amr = info.amrsw if info else None
-            if not amr:
-                import re
+            if info and info.amrsw:
+                return info.amrsw
+            import re
 
-                m = re.search(r"AMRsw=(\d+)", raw or "", re.IGNORECASE)
-                amr = m.group(1) if m else None
+            m = re.search(r"AMRsw=(\d+)", raw or "", re.IGNORECASE)
+            return m.group(1) if m else None
 
-            if amr == AMRSW_OK:
-                self._append_log(
-                    "INFO",
-                    f"AMRsw={amr} ya es correcto. No hace falta K. "
-                    "Reiniciando lecturas: QUIT → WAKE → ZOOM…",
+        def _restart_readings(note: str) -> None:
+            self._append_log("INFO", note)
+            try:
+                self.command_queue.start(
+                    [
+                        QueuedCommand(CMD_QUIT, wait_rx=True, rx_timeout_ms=10000, write_timeout_s=2.0),
+                        WAKE_SLOW,
+                        ZOOM_CMD,
+                    ],
+                    wait_rx=True,
                 )
-                try:
-                    self.command_queue.start(
-                        [
-                            QueuedCommand(CMD_QUIT, wait_rx=True, rx_timeout_ms=10000, write_timeout_s=2.0),
-                            WAKE_SLOW,
-                            ZOOM_CMD,
-                        ],
-                        wait_rx=True,
+            except RuntimeError as exc:
+                self._append_log("ERR", str(exc))
+
+        def _start_k_apply() -> None:
+            k_reply: dict = {"text": ""}
+
+            def on_step(cmd: str, rx: str) -> None:
+                if cmd.strip().lower().startswith("k="):
+                    k_reply["text"] = (rx or "").strip()
+
+            def after_k_verify() -> None:
+                amr_after = _extract_amr(self.command_queue.last_response)
+                k_rx = k_reply["text"].upper()
+
+                if k_rx == "NO":
+                    self._append_log(
+                        "WARN",
+                        f"k=10100000 respondio NO. AMRsw tras O: {amr_after or '?'}. "
+                        "El colector rechazo K; no se fuerza WAKE/ZOOM. "
+                        "Pruebe Login, QUIT y comando libre k=10100000.",
                     )
-                except RuntimeError as exc:
-                    self._append_log("ERR", str(exc))
-                return
+                    return
 
-            if amr:
-                self._append_log(
-                    "INFO",
-                    f"AMRsw={amr} (ideal={AMRSW_OK}). Enviando k=10100000…",
-                )
-            else:
-                self._append_log(
-                    "INFO",
-                    "No se pudo leer AMRsw. Intentando k=10100000 de todos modos…",
-                )
+                if amr_after and not amrsw_needs_k(amr_after):
+                    _restart_readings(
+                        f"Tras k=: AMRsw={amr_after} (meta OK). "
+                        "Reiniciando: QUIT → WAKE → ZOOM…"
+                    )
+                    return
 
-            def after_k_done() -> None:
-                self._append_log(
-                    "INFO",
-                    "Secuencia K terminada. Verifique AMRsw=10100000 con el boton O.",
+                _restart_readings(
+                    f"Tras k=: respuesta={k_reply['text'] or '?'} | "
+                    f"AMRsw={amr_after or '?'}. "
+                    "Continuando ciclo §8/§9: QUIT → WAKE → ZOOM…"
                 )
 
             try:
-                # Manual §8: k= → O → QUIT → WAKE → ZOOM
                 self.command_queue.start(
                     [
+                        QueuedCommand(CMD_QUIT, wait_rx=True, rx_timeout_ms=10000, write_timeout_s=2.0),
                         QueuedCommand(
                             cmd_restart_reading(),
                             wait_rx=True,
@@ -846,20 +998,85 @@ class AppWindow(ctk.CTk):
                         ),
                         QueuedCommand(
                             CMD_COUNT_METERS,
-                            multiline_ms=2000,
+                            multiline_ms=2500,
                             wait_rx=True,
-                            rx_timeout_ms=12000,
+                            rx_timeout_ms=15000,
                             write_timeout_s=2.0,
                         ),
-                        QueuedCommand(CMD_QUIT, wait_rx=True, rx_timeout_ms=10000, write_timeout_s=2.0),
-                        WAKE_SLOW,
-                        ZOOM_CMD,
                     ],
                     wait_rx=True,
-                    on_done=after_k_done,
+                    on_step=on_step,
+                    on_done=after_k_verify,
                 )
             except RuntimeError as exc:
                 self._append_log("ERR", str(exc))
+
+        def after_amr_check() -> None:
+            raw = (self.command_queue.last_response or "").strip()
+            amr = _extract_amr(raw)
+
+            if amr and not amrsw_needs_k(amr):
+                _restart_readings(
+                    f"Inferencia §8: AMRsw={amr} ya es la meta ({AMRSW_OK}). "
+                    "No hace falta k=. Reiniciando: QUIT → WAKE → ZOOM…"
+                )
+                return
+
+            if amr:
+                self._append_log(
+                    "INFO",
+                    f"Inferencia §8: AMRsw={amr} (distinto de {AMRSW_OK}). "
+                    "Hay que enviar k=10100000. "
+                    "(En el manual el ejemplo es 10000000; cualquier otro valor tambien vale.)",
+                )
+                _start_k_apply()
+                return
+
+            # Sin AMRsw: O respondio NO u otra cosa — no inventar k= a ciegas.
+            if self.command_queue.was_aborted and raw.upper() == "NO":
+                self._append_log(
+                    "WARN",
+                    "Abortando K: O respondio NO (sin AMRsw). "
+                    "Login → QUIT → O hasta ver AMRsw=…; luego K una sola vez.",
+                )
+                self._k_o_retry = False
+                return
+
+            if not self._k_o_retry:
+                self._k_o_retry = True
+                self._append_log(
+                    "WARN",
+                    f"O no entrego AMRsw (respuesta {raw!r}). "
+                    "Reintentando una vez: Login → QUIT → O…",
+                )
+                try:
+                    self.command_queue.start(
+                        [
+                            QueuedCommand(CMD_LOGIN, wait_rx=True, rx_timeout_ms=8000, write_timeout_s=2.0),
+                            QueuedCommand(CMD_QUIT, wait_rx=True, rx_timeout_ms=10000, write_timeout_s=2.0),
+                            QueuedCommand(
+                                CMD_COUNT_METERS,
+                                multiline_ms=2500,
+                                wait_rx=True,
+                                rx_timeout_ms=15000,
+                                write_timeout_s=2.0,
+                            ),
+                        ],
+                        wait_rx=True,
+                        on_done=after_amr_check,
+                    )
+                except RuntimeError as exc:
+                    self._append_log("ERR", str(exc))
+                return
+
+            self._k_o_retry = False
+            self._append_log(
+                "WARN",
+                "Abortando K: sin AMRsw para inferir (§8). "
+                "Si O responde NO, el colector no esta en modo mantenimiento. "
+                "Conecte → Login (UnLock) → espere el QUIT automatico → boton O. "
+                "Cuando vea AMRsw=… vuelva a pulsar K.",
+            )
 
         try:
             self.command_queue.start(
@@ -960,13 +1177,18 @@ class AppWindow(ctk.CTk):
                         tip = describe_lock_state(text)
                         if tip:
                             self._append_log("INFO", tip)
-                        # No lanzar otro login si ya estamos enviando/esperando PWR666666.
-                        last = self.command_queue.last_command.strip().upper()
-                        if last != CMD_LOGIN.upper():
-                            self._auto_login_on_lock()
+                        self._auto_login_on_lock()
                         continue
                     if is_unlock_response(text):
+                        self._login_ok = True
                         self._auto_login_pending = False
+                        self._login_lock_retries = 0
+                        if self._login_retry_after_id is not None:
+                            try:
+                                self.after_cancel(self._login_retry_after_id)
+                            except Exception:
+                                pass
+                            self._login_retry_after_id = None
                         tip = describe_lock_state(text)
                         if tip:
                             self._append_log("INFO", tip)
@@ -978,18 +1200,30 @@ class AppWindow(ctk.CTk):
                         else:
                             self.command_queue.on_unlock()
                         continue
+                    # Solo interpretar tip si este RX cierra/avanza un comando en curso.
+                    # Evita spam/loop de tips con last_command viejo (ej. QUIT) en RX sueltos.
+                    awaiting_cmd = (
+                        self.command_queue.last_command
+                        if self.command_queue.is_waiting_rx
+                        else ""
+                    )
                     self.command_queue.on_rx(text)
-                    tip = describe_status_response(text, self.command_queue.last_command)
-                    if tip:
-                        last = self.command_queue.last_command.strip().lower()
-                        # i / k= con NO suelen ser informativos, no fallos graves
-                        kind = (
-                            "INFO"
-                            if text.strip().upper() == "NO"
-                            and (last == "i" or last.startswith("k="))
-                            else "WARN"
-                        )
-                        self._append_log(kind, tip)
+                    if awaiting_cmd:
+                        tip = describe_status_response(text, awaiting_cmd)
+                        if tip:
+                            last = awaiting_cmd.strip().lower()
+                            # i / k= / QUIT con NO suelen ser informativos, no fallos graves
+                            kind = (
+                                "INFO"
+                                if text.strip().upper() == "NO"
+                                and (
+                                    last == "i"
+                                    or last == "quit"
+                                    or last.startswith("k=")
+                                )
+                                else "WARN"
+                            )
+                            self._append_log(kind, tip)
                     if parse_collector_info(text):
                         self.meters_tab.on_collector_info(text)
                     self.clock_tab.on_rx(text)
@@ -1016,7 +1250,7 @@ class AppWindow(ctk.CTk):
                         if self.command_queue.is_busy:
                             self.command_queue.cancel()
                         self._last_error_msg = ""
-                        self._auto_login_pending = False
+                        self._reset_login_state()
                     self._set_connected_ui(connected)
         except queue.Empty:
             pass
