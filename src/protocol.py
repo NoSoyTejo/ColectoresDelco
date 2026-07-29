@@ -516,20 +516,23 @@ def describe_status_response(raw: str, last_command: str = "") -> Optional[str]:
         # Upload IHHMMHHMM
         if cmd_low.startswith("i") and len(cmd) > 1:
             return (
-                f"Upload {cmd} respondio NO. Pare. "
-                "Vacie horarios en el colector (si aplica) y suba una sola vez."
+                f"Upload {cmd} respondio NO. "
+                "Si Download (i) ya mostro vacio, el formato I+HHMMHHMM no es el de este firmware. "
+                "Comados.doc §11 no documenta el comando; capture Upload desde RemoteCOM."
             )
         if cmd_low.startswith("pwr"):
             return (
-                "PWR666666 respondio NO (no hubo UnLock). "
-                "No es login OK. Pare — no encadene QUIT/O/K. "
-                "Desconecte y Conecte, o espere 2 s y Login una sola vez."
+                "PWR666666 respondio NO. "
+                "Si ya hubo UnLock en esta sesion, no pulse Login otra vez. "
+                "Si no hubo UnLock: Desconecte/Conecte o Login una sola vez; "
+                "no encadene QUIT/O/K tras este NO."
             )
         if cmd_low == "o":
             return (
                 "O respondio NO: sin AMRsw/IDnum. "
-                "Pare. Primero necesita UnLock real (no NO al PWR). "
-                "Luego QUIT → O (una vez). No pulse K hasta ver AMRsw."
+                "Si ya hubo UnLock y QUIT, el canal (TCP/gateway) puede no "
+                "exponer mantenimiento completo — pruebe el mismo O por COM. "
+                "Si no hubo UnLock: Login → QUIT → O (una vez)."
             )
         if cmd_low == "wake":
             return (
@@ -543,8 +546,9 @@ def describe_status_response(raw: str, last_command: str = "") -> Optional[str]:
             )
         if cmd_low.startswith("k="):
             return (
-                "k=10100000 respondio NO (K rechazado). Pare. "
-                "Verifique AMRsw con O; no reenvie k= en bucle."
+                "k=10100000 respondio NO (K rechazado por el firmware). Pare. "
+                "Para reiniciar lecturas use QUIT → WAKE → ZOOM (equivalente del manual). "
+                "No reenvie k= en bucle."
             )
         if cmd_low.startswith("a") or cmd_low.startswith("e") or cmd_low.startswith("sgxf"):
             return (
@@ -554,7 +558,22 @@ def describe_status_response(raw: str, last_command: str = "") -> Optional[str]:
         if cmd_low == "del":
             return "DEL respondio NO. No reintente en bucle; verifique QUIT/Login."
         if cmd_low == "ver":
-            return "VER respondio NO. Login + QUIT y pruebe VER otra vez."
+            return (
+                "VER respondio NO. Si ya hubo UnLock, no reintente en bucle: "
+                "pruebe fin de linea CR (solo \\r) o el mismo VER por COM."
+            )
+        if cmd_low.startswith("c") and len(cmd) == 13:
+            return (
+                "C… respondio NO: reloj no actualizado. "
+                "Si UnLock ya OK y O/VER tambien dan NO, el canal TCP "
+                "probablemente no soporta mantenimiento — pruebe por COM."
+            )
+        if cmd_low.startswith("r"):
+            return (
+                f"{cmd!r} respondio NO: sin lectura. "
+                "Si UnLock ya OK y O tambien da NO, compare por COM. "
+                "Si O funciona: Login → QUIT → lectura (una vez)."
+            )
         if cmd:
             return (
                 f"{cmd!r} respondio NO. Secuencia puede detenerse. "

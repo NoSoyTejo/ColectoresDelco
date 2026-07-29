@@ -63,7 +63,7 @@ class ClockTab(ctk.CTkScrollableFrame):
     """Reloj y horarios — similar a RemoteCOM (Clock / Time for reading / Startup&Stop)."""
 
     def __init__(self, master: ctk.CTkBaseClass, app: AppWindow) -> None:
-        super().__init__(master, label_text="Reloj y horarios — Comados.doc §9–§12")
+        super().__init__(master, label_text="Reloj y horarios")
         self.app = app
         self._slots: List[PollingSlot] = []
         self._selected_index: Optional[int] = None
@@ -95,17 +95,17 @@ class ClockTab(ctk.CTkScrollableFrame):
 
         clk_btns = ctk.CTkFrame(clock_box, fg_color="transparent")
         clk_btns.grid(row=3, column=0, columnspan=3, padx=10, pady=(6, 10), sticky="ew")
-        ctk.CTkButton(clk_btns, text="Sincronizar hora (C…)", command=self._sync_system_time).pack(
+        ctk.CTkButton(clk_btns, text="Sync hora", width=110, height=32, command=self._sync_system_time).pack(
             side="left", padx=(0, 8)
         )
-        ctk.CTkButton(clk_btns, text="Ver fecha medidor índice 0", command=self._read_collector_clock).pack(
+        ctk.CTkButton(clk_btns, text="Fecha índice 0", width=130, height=32, command=self._read_collector_clock).pack(
             side="left", padx=8
         )
         ctk.CTkLabel(
             clock_box,
-            text="El manual (§12) solo documenta C… para fijar hora. No hay comando oficial para leer el reloj interno.",
+            text="§12: Sync envía C… (hora del PC). Fecha índice 0 lee la última lectura almacenada (R0000F0312).",
             text_color=("gray40", "gray60"),
-            wraplength=720,
+            wraplength=520,
             justify="left",
         ).grid(row=6, column=0, columnspan=3, padx=10, pady=(0, 10), sticky="w")
 
@@ -114,7 +114,7 @@ class ClockTab(ctk.CTkScrollableFrame):
         ctk.CTkEntry(clock_box, textvariable=self.clock_var).grid(
             row=4, column=1, columnspan=2, padx=8, pady=4, sticky="ew"
         )
-        ctk.CTkButton(clock_box, text="Aplicar C…", command=self._apply_clock).grid(
+        ctk.CTkButton(clock_box, text="Aplicar C", width=100, height=30, command=self._apply_clock).grid(
             row=5, column=1, padx=8, pady=(0, 10), sticky="w"
         )
 
@@ -125,14 +125,13 @@ class ClockTab(ctk.CTkScrollableFrame):
         poll_box.grid_rowconfigure(3, weight=1)
 
         ctk.CTkLabel(
-            poll_box, text="§10 Horarios polling (comando i)", font=ctk.CTkFont(weight="bold")
+            poll_box, text="§10 Horarios polling", font=ctk.CTkFont(weight="bold")
         ).grid(row=0, column=0, padx=10, pady=(10, 2), sticky="w")
         ctk.CTkLabel(
             poll_box,
-            text="Ejemplo del manual: Total de poolings: 3  =  "
-            "00:00-03:59  |  04:00-15:59  |  16:00-23:59",
+            text="Ejemplo: 00:00–03:59 | 04:00–15:59 | 16:00–23:59",
             text_color=("gray40", "gray60"),
-            wraplength=720,
+            wraplength=520,
             justify="left",
         ).grid(row=1, column=0, padx=10, pady=(0, 4), sticky="w")
 
@@ -148,56 +147,76 @@ class ClockTab(ctk.CTkScrollableFrame):
         self.schedule_box = ctk.CTkTextbox(poll_box, height=160, font=ctk.CTkFont(family="Consolas", size=12))
         self.schedule_box.grid(row=3, column=0, padx=10, pady=8, sticky="nsew")
         self._show_schedule_text(
-            "Pulse Download (i) para leer los horarios del colector (§10).\n"
-            "Respuesta tipica:\n"
-            "  Total de poolings: 3   <- cantidad en el colector\n"
-            "  1 - De 00:00 ate 03:59\n"
-            "  2 - De 04:00 ate 15:59\n"
-            "  3 - De 16:00 ate 23:59\n"
-            "Boton '3 franjas (§10)' carga ese ejemplo para editar/Upload (§11)."
+            "Pulse Descargar para leer horarios del colector (§10).\n"
+            "Respuesta típica:\n"
+            "  Total de poolings: 3\n"
+            "  1 - De 00:00 até 03:59\n"
+            "  2 - De 04:00 até 15:59\n"
+            "  3 - De 16:00 até 23:59\n"
+            "Botón '3 franjas' carga el ejemplo; luego Subir (§11) si el colector está vacío."
         )
 
         poll_btns = ctk.CTkFrame(poll_box, fg_color="transparent")
-        poll_btns.grid(row=4, column=0, padx=10, pady=(0, 10), sticky="ew")
-        for text, cmd in (
-            ("Add", self._add_slot),
-            ("3 franjas (§10)", self._add_standard_three),
-            ("Día completo", self._add_full_day),
-            ("Delete", self._delete_slot),
-            ("Clear", self._clear_slots),
-            ("Download (i)", self._download_schedules),
-            ("Upload", self._upload_schedules),
+        poll_btns.grid(row=4, column=0, padx=10, pady=(0, 4), sticky="ew")
+        for text, cmd, w in (
+            ("Add", self._add_slot, 70),
+            ("3 franjas", self._add_standard_three, 90),
+            ("Día", self._add_full_day, 70),
+            ("Borrar", self._delete_slot, 70),
+            ("Limpiar", self._clear_slots, 70),
         ):
-            ctk.CTkButton(poll_btns, text=text, width=105, command=cmd).pack(side="left", padx=2)
+            ctk.CTkButton(poll_btns, text=text, width=w, height=30, command=cmd).pack(side="left", padx=2)
+
+        io_btns = ctk.CTkFrame(poll_box, fg_color="transparent")
+        io_btns.grid(row=5, column=0, padx=10, pady=(0, 10), sticky="ew")
+        ctk.CTkButton(
+            io_btns, text="Descargar", width=110, height=32, command=self._download_schedules
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            io_btns,
+            text="Subir",
+            width=110,
+            height=32,
+            command=self._upload_schedules,
+            fg_color=("#2B7A4B", "#1E5A35"),
+            hover_color=("#236B40", "#174A2B"),
+        ).pack(side="left", padx=2)
+        ctk.CTkLabel(
+            io_btns,
+            text="Descargar = i   ·   Subir = I… (§11, experimental)",
+            text_color=("gray40", "gray60"),
+        ).pack(side="left", padx=(12, 0))
 
         self.poll_status = ctk.StringVar(
-            value="Download = QUIT + i. Total de poolings = cantidad de horarios en el colector."
+            value="Descargar lee horarios del colector. Subir requiere lista local y colector vacío."
         )
-        ctk.CTkLabel(poll_box, textvariable=self.poll_status, text_color=("gray40", "gray60"), wraplength=700).grid(
-            row=5, column=0, padx=10, pady=(0, 10), sticky="w"
+        ctk.CTkLabel(poll_box, textvariable=self.poll_status, text_color=("gray40", "gray60"), wraplength=520).grid(
+            row=6, column=0, padx=10, pady=(0, 10), sticky="w"
         )
 
         # --- 3. Startup & Stop ---
         ss_box = ctk.CTkFrame(self)
         ss_box.grid(row=2, column=0, padx=8, pady=8, sticky="ew")
 
-        ctk.CTkLabel(ss_box, text="§9 Forzar lecturas (QUIT / WAKE / ZOOM)", font=ctk.CTkFont(weight="bold")).grid(
+        ctk.CTkLabel(ss_box, text="§9 Forzar lecturas", font=ctk.CTkFont(weight="bold")).grid(
             row=0, column=0, columnspan=3, padx=10, pady=(10, 6), sticky="w"
         )
         ss_btns = ctk.CTkFrame(ss_box, fg_color="transparent")
         ss_btns.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="ew")
-        ctk.CTkButton(ss_btns, text="QUIT (detener)", command=lambda: self.app._send_one(CMD_QUIT)).pack(
-            side="left", padx=(0, 8)
+        ctk.CTkButton(ss_btns, text="QUIT", width=80, height=30, command=lambda: self.app._send_one(CMD_QUIT)).pack(
+            side="left", padx=(0, 6)
         )
-        ctk.CTkButton(ss_btns, text="WAKE (tras QUIT)", command=self._send_wake).pack(side="left", padx=8)
-        ctk.CTkButton(ss_btns, text="ZOOM (start read)", command=self._send_zoom).pack(side="left", padx=8)
-        ctk.CTkButton(ss_btns, text="QUIT → WAKE → ZOOM", command=self._startup_full).pack(side="left", padx=8)
+        ctk.CTkButton(ss_btns, text="WAKE", width=80, height=30, command=self._send_wake).pack(side="left", padx=6)
+        ctk.CTkButton(ss_btns, text="ZOOM", width=80, height=30, command=self._send_zoom).pack(side="left", padx=6)
+        ctk.CTkButton(ss_btns, text="Forzar (Q+W+Z)", width=130, height=30, command=self._startup_full).pack(
+            side="left", padx=6
+        )
 
         ctk.CTkLabel(
             ss_box,
-            text="Si WAKE responde ROUTERERROR: use QUIT primero y luego QUIT → WAKE → ZOOM.",
+            text="Si WAKE falla: QUIT y luego Forzar (Q+W+Z).",
             text_color=("gray40", "gray60"),
-            wraplength=720,
+            wraplength=520,
         ).grid(row=2, column=0, padx=10, pady=(0, 10), sticky="w")
 
         self._tick_pc_time()
@@ -212,50 +231,104 @@ class ClockTab(ctk.CTkScrollableFrame):
         self.pc_time_var.set(now.strftime("%Y-%m-%d %H:%M:%S"))
 
     def _sync_system_time(self) -> None:
+        if not self.app.client.is_connected:
+            self.app._append_log("ERR", "Conecte primero al colector")
+            return
         cmd = cmd_set_clock_now()
         self.clock_var.set(cmd[1:])
 
         def _done() -> None:
+            q = self.app.command_queue
+            last = q.last_response.strip().upper()
+            if q.was_aborted or last != "OK":
+                self.app._append_log(
+                    "WARN",
+                    f"Reloj NO sincronizado ({q.last_command!r} → {last or 'sin respuesta'}). "
+                    "Login → QUIT → C… (una vez). Si sigue NO, pruebe O o VER.",
+                )
+                return
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self.collector_time_var.set(now)
             self.app._append_log("INFO", f"Reloj colector sincronizado: {now}")
 
-        self.app._send_many([cmd], wait_rx=True, on_done=_done)
-        self.app._append_log("INFO", "Sync System Time -> enviado al colector")
+        self.app._send_many([CMD_QUIT, cmd], wait_rx=True, on_done=_done)
+        self.app._append_log("INFO", "Sync System Time → QUIT + C… enviado al colector")
 
     def _read_collector_clock(self) -> None:
         if not self.app.client.is_connected:
             self.app._append_log("ERR", "Conecte primero al colector")
             return
 
+        read_clock: List[Optional[str]] = [None]
+
+        def on_step(cmd: str, response: str) -> None:
+            if not cmd.strip().upper().startswith("R"):
+                return
+            clock = parse_collector_clock(response)
+            if clock:
+                read_clock[0] = clock
+                self.collector_time_var.set(clock)
+
         def _done() -> None:
-            clock = self.collector_time_var.get().strip()
-            if clock and clock != "(sin leer)":
+            clock = read_clock[0]
+            if clock:
                 self.app._append_log(
                     "INFO",
                     f"Fecha medidor índice 0: {clock} "
                     "(última lectura almacenada; use Sync para fijar reloj del colector)",
                 )
-            else:
-                self.app._append_log("WARN", "No se obtuvo fecha del medidor índice 0")
+                return
+            q = self.app.command_queue
+            last = q.last_response.strip().upper()
+            self.collector_time_var.set("(sin leer)")
+            self.app._append_log(
+                "WARN",
+                f"No se obtuvo fecha del medidor índice 0 ({q.last_command!r} → {last or 'sin respuesta'}). "
+                "Login → QUIT → R0000F0312 (una vez).",
+            )
 
-        self.app._send_many(
-            [CMD_QUIT, cmd_read_collector_clock()],
-            wait_rx=True,
-            on_done=_done,
-        )
+        if self.app.command_queue.is_busy:
+            self.app._append_log("ERR", "Hay una secuencia en curso")
+            return
+        try:
+            self.app.command_queue.start(
+                [CMD_QUIT, cmd_read_collector_clock()],
+                wait_rx=True,
+                on_step=on_step,
+                on_done=_done,
+            )
+        except RuntimeError as exc:
+            self.app._append_log("ERR", str(exc))
 
     def _apply_clock(self) -> None:
+        if not self.app.client.is_connected:
+            self.app._append_log("ERR", "Conecte primero al colector")
+            return
         try:
-            self.app._send_one(cmd_set_clock(self.clock_var.get()))
+            cmd = cmd_set_clock(self.clock_var.get())
         except ValueError as exc:
             self.app._append_log("ERR", str(exc))
+            return
+
+        def _done() -> None:
+            q = self.app.command_queue
+            last = q.last_response.strip().upper()
+            if q.was_aborted or last != "OK":
+                self.app._append_log(
+                    "WARN",
+                    f"Reloj NO actualizado ({q.last_command!r} → {last or 'sin respuesta'}). "
+                    "Login → QUIT → C… (una vez).",
+                )
+                return
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.collector_time_var.set(now)
+            self.app._append_log("INFO", f"Reloj colector actualizado: {now}")
+
+        self.app._send_many([CMD_QUIT, cmd], wait_rx=True, on_done=_done)
 
     def on_rx(self, text: str) -> None:
         self.capture_polling_line(text)
-        clock = parse_collector_clock(text)
-        if clock:
-            self.collector_time_var.set(clock)
+        # No actualizar "Última sync C…" con RX sueltos; solo _sync_system_time / _read_collector_clock.
 
     def begin_polling_capture(self) -> None:
         self._polling_capture = True
@@ -299,7 +372,7 @@ class ClockTab(ctk.CTkScrollableFrame):
         self.app._append_log(
             "INFO",
             "Cargadas 3 franjas tipicas del manual (§10). "
-            "Si el colector esta vacio, puede intentar Upload (§11).",
+            "Si el colector esta vacio, puede intentar Subir (§11).",
         )
 
     def _add_full_day(self) -> None:
@@ -308,7 +381,7 @@ class ClockTab(ctk.CTkScrollableFrame):
         self.start_var.set("00:00")
         self.end_var.set("23:59")
         self._render_slots(total=1)
-        self.poll_status.set("Horario dia completo: 00:00 – 23:59 (pulse Upload para enviarlo)")
+        self.poll_status.set("Horario día completo: 00:00 – 23:59 (pulse Subir para enviarlo)")
 
     def _add_slot(self) -> None:
         try:
@@ -339,7 +412,7 @@ class ClockTab(ctk.CTkScrollableFrame):
         self._slots.clear()
         self._show_schedule_text(
             format_polling_table([], total=0)
-            + "\n\n# Use Download (i) o '3 franjas (§10)'"
+            + "\n\n# Use Descargar o '3 franjas'"
         )
         self.poll_status.set("Total de poolings: 0 (lista vacia)")
 
@@ -352,8 +425,8 @@ class ClockTab(ctk.CTkScrollableFrame):
             shown_total = total if total is not None else len(slots)
             self._render_slots(total=shown_total)
             self.poll_status.set(
-                f"Download OK — Total de poolings: {shown_total} "
-                f"(cantidad de horarios en el colector)"
+                f"Descarga OK — Total de poolings: {shown_total} "
+                f"(horarios en el colector)"
             )
             self.app._append_log(
                 "INFO",
@@ -367,13 +440,13 @@ class ClockTab(ctk.CTkScrollableFrame):
             self._slots.clear()
             self._show_schedule_text(
                 format_polling_table([], total=0)
-                + "\n\n# Sin horarios. Use '3 franjas (§10)' o Add, luego Upload (§11)\n"
+                + "\n\n# Sin horarios. Use '3 franjas' o Add, luego Subir (§11)\n"
                 "# (el colector debe estar vacio para insertar)."
             )
             self.poll_status.set("Total de poolings: 0 — sin horarios en el colector")
             self.app._append_log(
                 "INFO",
-                "Download OK: Total de poolings: 0 (colector sin horarios).",
+                "Descarga OK: Total de poolings: 0 (colector sin horarios).",
             )
             return
 
@@ -388,18 +461,18 @@ class ClockTab(ctk.CTkScrollableFrame):
                 header = f"Total de poolings: {total}\n\n"
             self._show_schedule_text(
                 f"# Respuesta del colector:\n{header}{raw.strip()}\n\n"
-                "# Si no se parsearon franjas, use '3 franjas (§10)' como plantilla."
+                "# Si no se parsearon franjas, use '3 franjas' como plantilla."
             )
             self._slots.clear()
         else:
             self._slots.clear()
             self._show_schedule_text(
                 "# El colector no respondio al comando i.\n"
-                "# 1) Login (UnLock)  2) QUIT (OK)  3) Download de nuevo"
+                "# 1) Login (UnLock)  2) QUIT (OK)  3) Descargar de nuevo"
             )
             self.app._append_log(
                 "WARN",
-                "Sin respuesta al comando i. Pulse QUIT, espere OK, y Download otra vez.",
+                "Sin respuesta al comando i. Pulse QUIT, espere OK, y Descargar otra vez.",
             )
 
     def _download_schedules(self) -> None:
@@ -410,7 +483,7 @@ class ClockTab(ctk.CTkScrollableFrame):
             self.app._append_log("ERR", "Hay una secuencia en curso")
             return
 
-        self.poll_status.set("Descargando horarios del colector (QUIT + i)…")
+        self.poll_status.set("Descargando horarios (QUIT + i)…")
         self._show_schedule_text("Leyendo horarios del colector…")
         self.begin_polling_capture()
 
@@ -422,9 +495,26 @@ class ClockTab(ctk.CTkScrollableFrame):
                 self.capture_polling_line(line)
 
         def _done() -> None:
+            q = self.app.command_queue
+            if q.was_aborted:
+                self.finish_polling_capture()
+                self.poll_status.set("Descarga interrumpida — vea el log")
+                self.app._append_log(
+                    "WARN",
+                    f"Descarga no completada ({q.last_command!r} falló).",
+                )
+                return
             raw = self.finish_polling_capture()
+            last_cmd = q.last_command.strip().lower()
+            if not raw.strip() and last_cmd == "i":
+                raw = q.last_response
             if not raw.strip():
-                raw = self.app.command_queue.last_response
+                self.poll_status.set("Descarga sin respuesta")
+                self.app._append_log(
+                    "WARN",
+                    "Descarga: sin respuesta al comando i (timeout o fallo de comunicación).",
+                )
+                return
             self._apply_download_result(raw)
 
         try:
@@ -467,8 +557,9 @@ class ClockTab(ctk.CTkScrollableFrame):
 
         self.app._append_log(
             "WARN",
-            "§11: el colector no debe tener horarios previos. "
-            "Si Upload falla, vacíe horarios en el colector y reintente.",
+            "§11: el colector no debe tener horarios previos (verifique con Descargar). "
+            "El comando de insercion NO esta en Comados.doc — la app prueba I+HHMM+HHMM. "
+            "Si responde NO con colector vacio, el formato no es el de este firmware (SLD16).",
         )
         # QUIT espera OK; comandos I… no bloquean esperando (formato no oficial);
         # luego WAKE/ZOOM con espera de respuesta.
@@ -485,17 +576,23 @@ class ClockTab(ctk.CTkScrollableFrame):
         self.poll_status.set(f"Subiendo {len(self._slots)} horario(s)…")
         self.app._append_log(
             "INFO",
-            f"Upload: QUIT + {len(upload_cmds)} horario(s) + WAKE + ZOOM. "
+            f"Subir: QUIT + {len(upload_cmds)} horario(s) + WAKE + ZOOM. "
             "Si responde NO, el formato I… puede ser incorrecto o ya hay horarios en el colector.",
         )
 
         def on_done() -> None:
-            last = self.app.command_queue.last_response.strip().upper()
-            if last == "NO":
-                self.poll_status.set("Upload rechazado (NO) — vea el log")
+            q = self.app.command_queue
+            last = q.last_response.strip().upper()
+            if q.was_aborted or last == "NO":
+                self.poll_status.set("Subida rechazada o incompleta — vea el log")
+                if q.was_aborted:
+                    self.app._append_log(
+                        "WARN",
+                        f"Subida interrumpida ({q.last_command!r} → {last or 'sin respuesta'}).",
+                    )
             else:
-                self.poll_status.set("Upload finalizado — verifique con Download (i)")
-                self.app._append_log("INFO", "Upload terminado. Pulse Download (i) para verificar.")
+                self.poll_status.set("Subida finalizada — verifique con Descargar")
+                self.app._append_log("INFO", "Subida terminada. Pulse Descargar para verificar.")
 
         self.app.command_queue.start(commands, on_done=on_done, wait_rx=True)
 
@@ -520,42 +617,60 @@ class MetersTab(ctk.CTkFrame):
         self._scan_active = False
 
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(3, weight=1)
+        self.grid_rowconfigure(4, weight=1)
 
         top = ctk.CTkFrame(self)
         top.grid(row=0, column=0, padx=12, pady=12, sticky="ew")
-        top.grid_columnconfigure(4, weight=1)
+        top.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(top, text="Medidores del colector", font=ctk.CTkFont(weight="bold")).grid(
-            row=0, column=0, columnspan=6, padx=8, pady=(8, 4), sticky="w"
+            row=0, column=0, columnspan=4, padx=8, pady=(8, 4), sticky="w"
         )
 
         self.count_var = ctk.StringVar(value="Cantidad: ?")
         ctk.CTkLabel(top, textvariable=self.count_var).grid(row=1, column=0, padx=8, pady=6, sticky="w")
-        ctk.CTkButton(top, text="Obtener cantidad (O)", command=self._fetch_count).grid(
-            row=1, column=1, padx=4, pady=6
+        ctk.CTkButton(top, text="Cantidad (O)", width=110, height=30, command=self._fetch_count).grid(
+            row=1, column=1, padx=4, pady=6, sticky="w"
         )
 
-        ctk.CTkLabel(top, text="Máx. a leer:").grid(row=1, column=2, padx=(12, 4), pady=6)
+        ctk.CTkLabel(top, text="Máx. escaneo:").grid(row=1, column=2, padx=(16, 4), pady=6, sticky="e")
         self.max_var = ctk.StringVar(value="50")
-        ctk.CTkEntry(top, textvariable=self.max_var, width=70).grid(row=1, column=3, padx=4, pady=6)
-
-        ctk.CTkButton(top, text="Leer medidor (T1-T4)", command=self._read_current_meter).grid(
-            row=1, column=4, padx=4, pady=6
+        ctk.CTkEntry(top, textvariable=self.max_var, width=60).grid(row=1, column=3, padx=4, pady=6, sticky="w")
+        ctk.CTkButton(top, text="Escanear", width=100, height=30, command=self._scan_all).grid(
+            row=1, column=4, padx=8, pady=6, sticky="w"
         )
-        ctk.CTkButton(top, text="Escanear todos", command=self._scan_all).grid(
-            row=1, column=5, padx=8, pady=6
+
+        # Lectura directa por número de medidor
+        ctk.CTkLabel(top, text="Medidor:").grid(row=2, column=0, padx=8, pady=6, sticky="e")
+        self.meter_id_var = ctk.StringVar(
+            value=(self.app.meter_var.get().strip() if hasattr(self.app, "meter_var") else "")
+        )
+        self.meter_entry = ctk.CTkEntry(
+            top, textvariable=self.meter_id_var, width=130, placeholder_text="ej. 24096522"
+        )
+        self.meter_entry.grid(row=2, column=1, padx=4, pady=6, sticky="w")
+        self.meter_entry.bind("<Return>", lambda _e: self._read_by_meter_id())
+        ctk.CTkButton(top, text="Leer medidor", width=110, height=30, command=self._read_by_meter_id).grid(
+            row=2, column=2, padx=4, pady=6, sticky="w"
+        )
+
+        ctk.CTkLabel(top, text="Índice:").grid(row=3, column=0, padx=8, pady=6, sticky="e")
+        self.index_var = ctk.StringVar(value="0")
+        ctk.CTkEntry(top, textvariable=self.index_var, width=60).grid(row=3, column=1, padx=4, pady=6, sticky="w")
+        ctk.CTkButton(top, text="Leer índice", width=110, height=30, command=self._read_by_index).grid(
+            row=3, column=2, padx=4, pady=6, sticky="w"
         )
 
         self.progress_var = ctk.StringVar(value="")
         ctk.CTkLabel(top, textvariable=self.progress_var, text_color=("gray40", "gray60")).grid(
-            row=2, column=0, columnspan=6, padx=8, pady=(0, 8), sticky="w"
+            row=4, column=0, columnspan=5, padx=8, pady=(0, 8), sticky="w"
         )
 
         ctk.CTkLabel(
             self,
-            text="T1/T2/T3/T4 según flags F18/F20/F21/F22 (RemoteCOM). Total=F19.",
+            text="Leer medidor = por número. Leer índice / Escanear = por posición (R0000, R0001…).",
             text_color=("gray40", "gray60"),
+            wraplength=520,
         ).grid(row=1, column=0, padx=12, pady=(0, 4), sticky="w")
 
         header = (
@@ -564,14 +679,18 @@ class MetersTab(ctk.CTkFrame):
             + "-" * 90 + "\n"
         )
         self.table = ctk.CTkTextbox(self, font=ctk.CTkFont(family="Consolas", size=12))
-        self.table.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="nsew")
+        self.table.grid(row=4, column=0, padx=12, pady=(0, 12), sticky="nsew")
         self.table.insert("1.0", header)
         self.table.configure(state="disabled")
 
         actions = ctk.CTkFrame(self, fg_color="transparent")
-        actions.grid(row=4, column=0, padx=12, pady=(0, 12), sticky="ew")
-        ctk.CTkButton(actions, text="Limpiar tabla", command=self._clear_table).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(actions, text="Cancelar escaneo", command=self._cancel_scan).pack(side="left")
+        actions.grid(row=5, column=0, padx=12, pady=(0, 12), sticky="ew")
+        ctk.CTkButton(actions, text="Limpiar", width=90, height=30, command=self._clear_table).pack(
+            side="left", padx=(0, 8)
+        )
+        ctk.CTkButton(actions, text="Cancelar escaneo", width=140, height=30, command=self._cancel_scan).pack(
+            side="left"
+        )
 
     def _clear_table(self) -> None:
         self._readings.clear()
@@ -620,14 +739,114 @@ class MetersTab(ctk.CTkFrame):
             wait_rx=True,
         )
 
-    def _read_current_meter(self) -> None:
-        meter = self.app.meter_var.get().strip()
+    def _sync_meter_to_app(self, meter: str) -> None:
+        """Mantiene el campo Medidor de Comandos alineado al de esta pestaña."""
+        if hasattr(self.app, "meter_var"):
+            self.app.meter_var.set(meter)
+
+    def _read_by_meter_id(self) -> None:
+        if not self.app.client.is_connected:
+            self.app._append_log("ERR", "Conecte primero al colector")
+            return
+        if self.app.command_queue.is_busy:
+            self.app._append_log("ERR", "Hay una secuencia en curso")
+            return
+        meter = self.meter_id_var.get().strip()
         if not meter:
-            self.app._append_log("ERR", "Indique el medidor en la pestaña Comandos")
+            self.app._append_log("ERR", "Indique el número de medidor")
             return
         try:
-            self.app._send_one(cmd_multitariff_read(meter))
+            cmd = cmd_multitariff_read(meter)
         except ValueError as exc:
+            self.app._append_log("ERR", str(exc))
+            return
+
+        self._sync_meter_to_app(meter)
+        self.progress_var.set(f"Leyendo medidor {meter}…")
+        self._scan_active = True
+        got = [False]
+
+        def on_step(_cmd: str, rx: str) -> None:
+            if not _cmd.strip().upper().startswith("R"):
+                return
+            if parse_meter_reading(rx):
+                got[0] = True
+                self.on_meter_rx(rx)
+
+        def on_done() -> None:
+            self._scan_active = False
+            q = self.app.command_queue
+            if got[0]:
+                self.progress_var.set(f"Lectura OK — medidor {meter}")
+                return
+            last = q.last_response.strip().upper()
+            self.progress_var.set(f"Sin lectura — medidor {meter}")
+            self.app._append_log(
+                "WARN",
+                f"No se obtuvo lectura del medidor {meter} "
+                f"({q.last_command!r} → {last or 'sin respuesta'}).",
+            )
+
+        try:
+            self.app.command_queue.start(
+                [CMD_QUIT, QueuedCommand(cmd, wait_rx=True, rx_timeout_ms=12000, write_timeout_s=2.0)],
+                wait_rx=True,
+                on_step=on_step,
+                on_done=on_done,
+            )
+        except RuntimeError as exc:
+            self.app._append_log("ERR", str(exc))
+
+    def _read_by_index(self) -> None:
+        if not self.app.client.is_connected:
+            self.app._append_log("ERR", "Conecte primero al colector")
+            return
+        if self.app.command_queue.is_busy:
+            self.app._append_log("ERR", "Hay una secuencia en curso")
+            return
+        try:
+            index = int(self.index_var.get().strip())
+        except ValueError:
+            self.app._append_log("ERR", "Índice debe ser un número (0, 1, 2…)")
+            return
+        if index < 0 or index > 9999:
+            self.app._append_log("ERR", "Índice fuera de rango (0-9999)")
+            return
+
+        cmd = cmd_read_by_index(index, READ_FLAGS_MULTITARIFF)
+        self.progress_var.set(f"Leyendo índice {index}…")
+        self._scan_active = True
+        got = [False]
+
+        def on_step(_cmd: str, rx: str) -> None:
+            if not _cmd.strip().upper().startswith("R"):
+                return
+            if parse_meter_reading(rx):
+                got[0] = True
+                self.on_meter_rx(rx)
+
+        def on_done() -> None:
+            self._scan_active = False
+            q = self.app.command_queue
+            if got[0]:
+                self.progress_var.set(f"Lectura OK — índice {index}")
+                return
+            last = q.last_response.strip().upper()
+            self.progress_var.set(f"Sin lectura — índice {index}")
+            self.app._append_log(
+                "WARN",
+                f"No se obtuvo lectura del índice {index} "
+                f"({q.last_command!r} → {last or 'sin respuesta'}).",
+            )
+
+        try:
+            self.app.command_queue.start(
+                [CMD_QUIT, QueuedCommand(cmd, wait_rx=True, rx_timeout_ms=12000, write_timeout_s=2.0)],
+                wait_rx=True,
+                on_step=on_step,
+                on_done=on_done,
+            )
+        except RuntimeError as exc:
             self.app._append_log("ERR", str(exc))
 
     def _scan_all(self) -> None:
@@ -650,16 +869,36 @@ class MetersTab(ctk.CTkFrame):
         self._scan_active = True
         self._scan_total = total
         self._scan_index = 0
+        ok_reads = [0]
         self.progress_var.set(f"Escaneando 0/{total}…")
 
         def on_step(_cmd: str, rx: str) -> None:
             self._scan_index += 1
             self.progress_var.set(f"Escaneando {self._scan_index}/{total}…")
-            self.on_meter_rx(rx)
+            if parse_meter_reading(rx):
+                ok_reads[0] += 1
+                self.on_meter_rx(rx)
 
         def on_done() -> None:
             self._scan_active = False
-            self.progress_var.set(f"Listo: {self._scan_index} lecturas")
+            q = self.app.command_queue
+            if q.was_aborted:
+                self.progress_var.set(f"Escaneo detenido: {ok_reads[0]}/{total} lecturas OK")
+                self.app._append_log(
+                    "WARN",
+                    f"Escaneo interrumpido en índice {self._scan_index}/{total} "
+                    f"({q.last_command!r} → {q.last_response.strip().upper() or 'sin respuesta'}). "
+                    f"Lecturas válidas: {ok_reads[0]}.",
+                )
+            elif ok_reads[0] == 0:
+                self.progress_var.set("Sin lecturas válidas")
+                self.app._append_log(
+                    "WARN",
+                    f"Escaneo completado sin lecturas válidas (0/{total}). "
+                    "Login → QUIT y reintente.",
+                )
+            else:
+                self.progress_var.set(f"Listo: {ok_reads[0]} lecturas")
 
         self.app.command_queue.start(commands, on_step=on_step, on_done=on_done, wait_rx=True)
 
@@ -704,9 +943,15 @@ class BulkLoadTab(ctk.CTkFrame):
 
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.grid(row=3, column=0, padx=12, pady=4, sticky="ew")
-        ctk.CTkButton(btn_row, text="Cargar archivo…", command=self._load_file).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(btn_row, text="Previsualizar", command=self._preview).pack(side="left", padx=8)
-        ctk.CTkButton(btn_row, text="Ejecutar carga", command=self._execute).pack(side="left", padx=8)
+        ctk.CTkButton(btn_row, text="Archivo…", width=100, height=30, command=self._load_file).pack(
+            side="left", padx=(0, 8)
+        )
+        ctk.CTkButton(btn_row, text="Vista previa", width=110, height=30, command=self._preview).pack(
+            side="left", padx=8
+        )
+        ctk.CTkButton(btn_row, text="Ejecutar", width=100, height=30, command=self._execute).pack(
+            side="left", padx=8
+        )
 
         self.preview_box = ctk.CTkTextbox(self, font=ctk.CTkFont(family="Consolas", size=12))
         self.preview_box.grid(row=4, column=0, padx=12, pady=(4, 12), sticky="nsew")
@@ -773,6 +1018,18 @@ class BulkLoadTab(ctk.CTkFrame):
         self.status_var.set(f"Enviando {len(queued)} comandos…")
 
         def on_done() -> None:
-            self.status_var.set(f"Carga finalizada ({len(valid)} medidores)")
+            q = self.app.command_queue
+            if q.was_aborted:
+                self.status_var.set(
+                    f"Carga interrumpida ({q.last_command!r} → "
+                    f"{q.last_response.strip().upper() or 'sin respuesta'})"
+                )
+                self.app._append_log(
+                    "WARN",
+                    f"Carga masiva interrumpida. Medidores enviados: hasta {len(valid)} "
+                    f"(verifique en el colector con O).",
+                )
+            else:
+                self.status_var.set(f"Carga finalizada ({len(valid)} medidores)")
 
         self.app.command_queue.start(queued, on_done=on_done, wait_rx=True)

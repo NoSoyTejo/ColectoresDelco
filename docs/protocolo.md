@@ -52,7 +52,7 @@ La app **espera respuesta** entre cada paso de estas secuencias.
 | 8 | Reiniciar ciclo K | `QUIT` → `O` (leer AMRsw e *inferir*) → si ≠`10100000`: `k=10100000` → `O` → `QUIT` → `WAKE` → `ZOOM` |
 | 9 | Forzar lecturas | `QUIT` → `WAKE` → `ZOOM` |
 | 10 | Ver horarios | `QUIT` → `i` (`NO` = sin horarios) |
-| 11 | Insertar horarios | Manual no define el comando. App prueba `I`+HHMM+HHMM (validar en hardware). |
+| 11 | Insertar horarios | **No documentado en el manual.** La app prueba `I`+HHMM+HHMM; en SLD16 v3.1.41 responde `NO` aunque `i`=vacío. Falta captura desde RemoteCOM. |
 | 12 | Fecha/hora | `C`+AAMMDDHHMMSS |
 | 13 | Borrar base | `QUIT` (OK) → `DEL` |
 

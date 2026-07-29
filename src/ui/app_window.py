@@ -95,16 +95,16 @@ class AppWindow(ctk.CTk):
 
     BAUD_OPTIONS = ["1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200"]
     ENDING_OPTIONS = {
-        "CR+LF (\\r\\n)": "\r\n",
-        "CR (\\r)": "\r",
-        "LF (\\n)": "\n",
+        "CR+LF": "\r\n",
+        "CR": "\r",
+        "LF": "\n",
         "Ninguno": "",
     }
 
     def __init__(self) -> None:
         super().__init__()
         self.title("Proyecto Colectores")
-        self.geometry("1120x740")
+        self.geometry("1180x780")
         self.minsize(960, 620)
 
         ctk.set_appearance_mode("System")
@@ -162,7 +162,7 @@ class AppWindow(ctk.CTk):
         for label, value in self.ENDING_OPTIONS.items():
             if value == ending:
                 return label
-        return "CR+LF (\\r\\n)"
+        return "CR+LF"
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
@@ -181,14 +181,14 @@ class AppWindow(ctk.CTk):
 
         subtitle = ctk.CTkLabel(
             title_row,
-            text="Cable COM o IP (TCP) · comandos Delco (lectura, login, medidores, K…)",
+            text="COM o IP · protocolo Delco",
             font=ctk.CTkFont(size=13),
             text_color=("gray30", "gray70"),
             anchor="w",
         )
         subtitle.grid(row=0, column=0, sticky="w")
 
-        ctk.CTkButton(title_row, text="Qué hace cada cosa", width=160, command=self._show_help).grid(
+        ctk.CTkButton(title_row, text="Ayuda", width=80, command=self._show_help).grid(
             row=0, column=1, padx=(8, 0)
         )
 
@@ -219,16 +219,16 @@ class AppWindow(ctk.CTk):
             top,
             variable=self.ending_var,
             values=list(self.ENDING_OPTIONS.keys()),
-            width=130,
+            width=90,
         )
         self.ending_menu.pack(side="left", padx=(0, 12))
 
-        self.btn_connect = ctk.CTkButton(top, text="Conectar", width=110, command=self._toggle_connect)
+        self.btn_connect = ctk.CTkButton(top, text="Conectar", width=100, command=self._toggle_connect)
         self.btn_connect.pack(side="right", padx=(8, 0))
         self.btn_cancel_seq = ctk.CTkButton(
             top,
-            text="Cancelar secuencia",
-            width=140,
+            text="Cancelar",
+            width=100,
             fg_color=("gray70", "gray35"),
             command=self._cancel_sequence,
         )
@@ -360,39 +360,39 @@ class AppWindow(ctk.CTk):
         ctk.CTkLabel(cmds, text="1. Flujo base", font=ctk.CTkFont(weight="bold")).grid(
             row=4, column=0, columnspan=2, padx=8, pady=(8, 4), sticky="w"
         )
-        self._cmd_btn(cmds, 5, 0, "QUIT (detener)", lambda: self._send_one(CMD_QUIT))
-        self._cmd_btn(cmds, 5, 1, "Login PWR666666", lambda: self._send_one(CMD_LOGIN))
-        self._cmd_btn(cmds, 6, 0, "QUIT->WAKE->ZOOM", self._do_quit_wake_zoom)
-        self._cmd_btn(cmds, 6, 1, "Diagnostico VER+O", self._do_quick_diag)
+        self._cmd_btn(cmds, 5, 0, "QUIT", lambda: self._send_one(CMD_QUIT))
+        self._cmd_btn(cmds, 5, 1, "Login", lambda: self._send_one(CMD_LOGIN))
+        self._cmd_btn(cmds, 6, 0, "Forzar lecturas", self._do_quit_wake_zoom)
+        self._cmd_btn(cmds, 6, 1, "Diagnóstico", self._do_quick_diag)
 
         ctk.CTkLabel(cmds, text="2. Lectura y refresco", font=ctk.CTkFont(weight="bold")).grid(
             row=7, column=0, columnspan=2, padx=8, pady=(12, 4), sticky="w"
         )
-        self._cmd_btn(cmds, 8, 0, "Lectura R...F031812", self._do_direct_read)
-        self._cmd_btn(cmds, 8, 1, "Refresco SGXF...", self._do_refresh)
-        self._cmd_btn(cmds, 9, 0, "Lectura T1-T4", self._do_multitariff_read)
+        self._cmd_btn(cmds, 8, 0, "Leer medidor", self._do_direct_read)
+        self._cmd_btn(cmds, 8, 1, "Refresco", self._do_refresh)
+        self._cmd_btn(cmds, 9, 0, "Leer T1–T4", self._do_multitariff_read)
 
-        ctk.CTkLabel(cmds, text="3. Medidores", font=ctk.CTkFont(weight="bold")).grid(
+        ctk.CTkLabel(cmds, text="3. Medidores en base", font=ctk.CTkFont(weight="bold")).grid(
             row=10, column=0, columnspan=2, padx=8, pady=(12, 4), sticky="w"
         )
-        self._cmd_btn(cmds, 11, 0, "Agregar A...", self._do_add_meter)
-        self._cmd_btn(cmds, 11, 1, "Borrar E...", self._do_delete_meter)
-        self._cmd_btn(cmds, 12, 0, "Agregar CP4 (A...00)", self._do_add_individual)
-        self._cmd_btn(cmds, 12, 1, "DEL (borrar base)", self._do_delete_base)
+        self._cmd_btn(cmds, 11, 0, "Agregar", self._do_add_meter)
+        self._cmd_btn(cmds, 11, 1, "Borrar", self._do_delete_meter)
+        self._cmd_btn(cmds, 12, 0, "Agregar CP4", self._do_add_individual)
+        self._cmd_btn(cmds, 12, 1, "Borrar base", self._do_delete_base)
 
-        ctk.CTkLabel(cmds, text="4. Informacion", font=ctk.CTkFont(weight="bold")).grid(
+        ctk.CTkLabel(cmds, text="4. Estado del colector", font=ctk.CTkFont(weight="bold")).grid(
             row=13, column=0, columnspan=2, padx=8, pady=(12, 4), sticky="w"
         )
-        self._cmd_btn(cmds, 14, 0, "VER (version)", lambda: self._send_one(CMD_VERSION))
-        self._cmd_btn(cmds, 14, 1, "O (cant. medidores)", self._do_count_meters)
-        self._cmd_btn(cmds, 15, 0, "K (revisa AMRsw)", self._do_restart_k)
-        self._cmd_btn(cmds, 15, 1, "i -> Reloj", lambda: self.tabview.set("Reloj"))
+        self._cmd_btn(cmds, 14, 0, "Versión", lambda: self._send_one(CMD_VERSION))
+        self._cmd_btn(cmds, 14, 1, "Cantidad", self._do_count_meters)
+        self._cmd_btn(cmds, 15, 0, "Reiniciar K", self._do_restart_k)
+        self._cmd_btn(cmds, 15, 1, "Ir a Reloj", lambda: self.tabview.set("Reloj"))
 
         note = ctk.CTkLabel(
             cmds,
-            text="Flujo tipico: QUIT -> comando -> WAKE -> ZOOM. "
-            "Horarios/reloj en pestana Reloj. Conexion: COM o IP.",
-            wraplength=360,
+            text="Flujo típico: QUIT → comando → Forzar lecturas (WAKE+ZOOM).\n"
+            "Horarios en pestaña Reloj. Use Cancelar si una secuencia se atasca.",
+            wraplength=340,
             justify="left",
             text_color=("gray40", "gray60"),
         )
@@ -400,7 +400,8 @@ class AppWindow(ctk.CTk):
 
         ctk.CTkButton(
             cmds,
-            text="Abrir carpeta de logs",
+            text="Abrir logs",
+            height=30,
             command=self._open_logs_folder,
         ).grid(row=17, column=0, columnspan=2, padx=8, pady=(0, 8), sticky="ew")
 
@@ -414,8 +415,8 @@ class AppWindow(ctk.CTk):
         self.bulk_tab.pack(fill="both", expand=True)
 
     def _cmd_btn(self, parent: Any, row: int, col: int, text: str, command: Any) -> None:
-        ctk.CTkButton(parent, text=text, command=command).grid(
-            row=row, column=col, padx=6, pady=4, sticky="ew"
+        ctk.CTkButton(parent, text=text, height=32, command=command).grid(
+            row=row, column=col, padx=5, pady=3, sticky="ew"
         )
 
     def _is_tcp_mode(self) -> bool:
@@ -961,6 +962,12 @@ class AppWindow(ctk.CTk):
                     k_reply["text"] = (rx or "").strip()
 
             def after_k_verify() -> None:
+                if self.command_queue.was_aborted:
+                    self._append_log(
+                        "WARN",
+                        "Secuencia K interrumpida; no se reinicia lectura (WAKE/ZOOM).",
+                    )
+                    return
                 amr_after = _extract_amr(self.command_queue.last_response)
                 k_rx = k_reply["text"].upper()
 
@@ -968,8 +975,8 @@ class AppWindow(ctk.CTk):
                     self._append_log(
                         "WARN",
                         f"k=10100000 respondio NO. AMRsw tras O: {amr_after or '?'}. "
-                        "El colector rechazo K; no se fuerza WAKE/ZOOM. "
-                        "Pruebe Login, QUIT y comando libre k=10100000.",
+                        "En este colector K fue rechazado. "
+                        "Use boton QUIT→WAKE→ZOOM para forzar lecturas (ZOOM ya funciona en COM).",
                     )
                     return
 
@@ -1012,6 +1019,15 @@ class AppWindow(ctk.CTk):
                 self._append_log("ERR", str(exc))
 
         def after_amr_check() -> None:
+            if self.command_queue.was_aborted:
+                raw = (self.command_queue.last_response or "").strip()
+                self._append_log(
+                    "WARN",
+                    f"Secuencia K interrumpida en O ({raw!r}). "
+                    "Login → QUIT → O y vuelva a pulsar K.",
+                )
+                self._k_o_retry = False
+                return
             raw = (self.command_queue.last_response or "").strip()
             amr = _extract_amr(raw)
 
@@ -1032,8 +1048,8 @@ class AppWindow(ctk.CTk):
                 _start_k_apply()
                 return
 
-            # Sin AMRsw: O respondio NO u otra cosa — no inventar k= a ciegas.
-            if self.command_queue.was_aborted and raw.upper() == "NO":
+            # Sin AMRsw: respuesta vacía o no parseable — no inventar k= a ciegas.
+            if raw.upper() == "NO":
                 self._append_log(
                     "WARN",
                     "Abortando K: O respondio NO (sin AMRsw). "
@@ -1120,11 +1136,11 @@ class AppWindow(ctk.CTk):
         if not self.client.is_connected:
             self._append_log("ERR", "Conecte primero al colector")
             return
-        self._append_log("INFO", "Diagnostico: VER → QUIT → O")
+        self._append_log("INFO", "Diagnostico: QUIT → VER → O")
         self._send_many(
             [
-                QueuedCommand(CMD_VERSION, wait_rx=True, rx_timeout_ms=8000, write_timeout_s=2.0),
                 QueuedCommand(CMD_QUIT, wait_rx=True, rx_timeout_ms=10000, write_timeout_s=2.0),
+                QueuedCommand(CMD_VERSION, wait_rx=True, rx_timeout_ms=8000, write_timeout_s=2.0),
                 QueuedCommand(
                     CMD_COUNT_METERS,
                     multiline_ms=2500,
