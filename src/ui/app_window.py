@@ -136,6 +136,7 @@ class AppWindow(ctk.CTk):
         self._last_error_msg = ""
         self._auto_login_pending = False
         self._login_lock_retries = 0
+        self._login_lock_blocked = False
         self._login_ok = False
         self._login_retry_after_id: Optional[str] = None
         self._status_idle = "Desconectado — elija COM o IP y pulse Conectar"
@@ -569,38 +570,27 @@ class AppWindow(ctk.CTk):
     def _on_queue_busy(self, busy: bool) -> None:
         if busy:
             cmd = self.command_queue.last_command or "…"
-            self.status_var.set(f"Secuencia en curso ({cmd}) — espere o pulse Cancelar secuencia")
+            self.status_var.set(f"Secuencia en curso ({cmd}) — espere o pulse Cancelar")
         elif self.client.is_connected:
             self.status_var.set(self._connection_status_text())
         else:
             self.status_var.set(self._status_idle)
 
     def _cancel_sequence(self) -> None:
+        was_blocked = self._login_lock_blocked
         self._reset_login_state()
         if self.command_queue.is_busy:
             self.command_queue.cancel()
             self._append_log("INFO", "Secuencia cancelada por el usuario")
+        elif was_blocked:
+            self._append_log("INFO", "Auto-login reactivado — puede pulsar Login.")
         else:
             self._append_log("INFO", "No hay secuencia en curso")
-
-    def _serial_write_only(self, command: str, write_timeout_s: float = 0.0) -> bool:
-        """Solo I/O del transporte activo. NO tocar la UI (se llama desde hilo worker)."""
-        transport = self.client
-        if not transport.is_connected:
-            return False
-        ending = self._current_line_ending()
-        try:
-            timeout = write_timeout_s if write_timeout_s > 0 else 2.0
-            transport.send(format_command(command, ending), write_timeout=timeout)
-            return True
-        except ConnectionError as exc:
-            # Notificar a la UI sin tocar Tk desde este hilo.
-            self._ui_queue.put(("write_fail", str(exc)))
-            return False
 
     def _reset_login_state(self) -> None:
         self._auto_login_pending = False
         self._login_lock_retries = 0
+        self._login_lock_blocked = False
         self._login_ok = False
         if self._login_retry_after_id is not None:
             try:
@@ -628,11 +618,12 @@ class AppWindow(ctk.CTk):
                     "Login no completo (no hubo UnLock). "
                     f"Ultima respuesta: {self.command_queue.last_response!r}. "
                     "No se envia QUIT automatico. "
-                    "Si PWR responde NO, Desconecte/Conecte o pulse Login una vez; "
-                    "si el colector ya estaba libre, pruebe O directamente.",
+                    "Espere 2 s y pulse Login una vez, o Desconectar/Conectar. "
+                    "Cierre RemoteCOM u otra app que use el COM.",
                 )
                 return
             self._login_ok = True
+            self._login_lock_blocked = False
             self._append_log(
                 "INFO",
                 "Tras login OK: enviando QUIT para modo mantenimiento…",
@@ -656,13 +647,8 @@ class AppWindow(ctk.CTk):
 
     def _fail_login_lock_loop(self) -> None:
         """Corta el spam de PWR cuando el colector solo responde Lock."""
-        self._append_log(
-            "WARN",
-            "Lock persistente: PWR666666 no produce UnLock. "
-            "Pare (no se reenvia login en bucle). "
-            "Espere 2-3 s, pulse Login una vez, o Desconectar/Conectar. "
-            "Si sigue Lock, revise IP/puerto o clave del colector.",
-        )
+        self._login_lock_blocked = True
+        self._login_lock_retries = 0
         self._auto_login_pending = False
         if self._login_retry_after_id is not None:
             try:
@@ -670,6 +656,12 @@ class AppWindow(ctk.CTk):
             except Exception:
                 pass
             self._login_retry_after_id = None
+        self._append_log(
+            "WARN",
+            "Lock persistente: PWR666666 no produjo UnLock (3 reintentos). "
+            "Auto-login pausado. Espere 3 s y pulse Login, o Desconectar/Conectar. "
+            "Cierre RemoteCOM si esta abierto. No pulse VER/O/lectura hasta tener UnLock.",
+        )
         if self.command_queue.is_busy:
             self.command_queue.cancel()
 
@@ -680,6 +672,17 @@ class AppWindow(ctk.CTk):
         """
         if not self.client.is_connected:
             return
+
+        # Tras agotar reintentos: no cancelar en bucle ni reenviar PWR solo.
+        if self._login_lock_blocked:
+            if self.command_queue.is_busy:
+                self.command_queue.cancel()
+            self._append_log(
+                "WARN",
+                "Sigue Lock — auto-login pausado. Pulse Login o Desconectar/Conectar.",
+            )
+            return
+
         # Ya hay un reintento programado: no spamear.
         if self._login_retry_after_id is not None:
             return
@@ -691,7 +694,7 @@ class AppWindow(ctk.CTk):
         self._login_lock_retries += 1
         self._auto_login_pending = True
         attempt = self._login_lock_retries
-        delay_ms = 1200 * attempt  # 1.2s, 2.4s, 3.6s
+        delay_ms = 2000 * attempt  # 2s, 4s, 6s
 
         waiting_login = (
             self.command_queue.is_waiting_rx
@@ -701,7 +704,7 @@ class AppWindow(ctk.CTk):
 
         def _do_retry() -> None:
             self._login_retry_after_id = None
-            if not self.client.is_connected:
+            if not self.client.is_connected or self._login_lock_blocked:
                 return
             if waiting_login or (
                 self.command_queue.is_waiting_rx
@@ -750,6 +753,21 @@ class AppWindow(ctk.CTk):
 
         self._login_retry_after_id = self.after(delay_ms, _do_retry)
 
+    def _serial_write_only(self, command: str, write_timeout_s: float = 0.0) -> bool:
+        """Solo I/O del transporte activo. NO tocar la UI (se llama desde hilo worker)."""
+        transport = self.client
+        if not transport.is_connected:
+            return False
+        ending = self._current_line_ending()
+        try:
+            timeout = write_timeout_s if write_timeout_s > 0 else 2.0
+            transport.send(format_command(command, ending), write_timeout=timeout)
+            return True
+        except ConnectionError as exc:
+            # Notificar a la UI sin tocar Tk desde este hilo.
+            self._ui_queue.put(("write_fail", str(exc)))
+            return False
+
     def _on_connection_lost(self, reason: str) -> None:
         if reason == self._last_error_msg:
             return
@@ -771,11 +789,12 @@ class AppWindow(ctk.CTk):
 
     def _send_one(self, command: str) -> None:
         if self.command_queue.is_busy:
-            self._append_log("ERR", "Hay una secuencia en curso. Espere o pulse Cancelar secuencia.")
+            self._append_log("ERR", "Hay una secuencia en curso. Espere o pulse Cancelar.")
             return
         if command.strip().upper() == CMD_LOGIN.upper():
             self._reset_login_state()
             self._auto_login_pending = True
+            self._append_log("INFO", "Login manual PWR666666…")
         self.cmd_var.set(command)
         try:
             self.command_queue.start(
@@ -801,7 +820,7 @@ class AppWindow(ctk.CTk):
             self._append_log("ERR", "No hay conexión activa")
             return
         if self.command_queue.is_busy:
-            self._append_log("ERR", "Hay una secuencia en curso. Espere o pulse Cancelar secuencia.")
+            self._append_log("ERR", "Hay una secuencia en curso. Espere o pulse Cancelar.")
             return
         try:
             self.command_queue.start(cmds, wait_rx=wait_rx, on_done=on_done)
@@ -816,7 +835,7 @@ class AppWindow(ctk.CTk):
             self._append_log("ERR", "No hay conexión activa")
             return
         if self.command_queue.is_busy:
-            self._append_log("ERR", "Hay una secuencia en curso. Espere o pulse Cancelar secuencia.")
+            self._append_log("ERR", "Hay una secuencia en curso. Espere o pulse Cancelar.")
             return
         try:
             self.command_queue.start(
@@ -925,7 +944,7 @@ class AppWindow(ctk.CTk):
             self._append_log("ERR", "Conecte primero al colector")
             return
         if self.command_queue.is_busy:
-            self._append_log("ERR", "Hay una secuencia en curso. Espere o pulse Cancelar secuencia.")
+            self._append_log("ERR", "Hay una secuencia en curso. Espere o pulse Cancelar.")
             return
 
         self._append_log("INFO", "K (§8): QUIT + O para leer AMRsw e inferir si hace falta k=…")
@@ -1190,13 +1209,15 @@ class AppWindow(ctk.CTk):
                     text = payload.rstrip("\r\n")
                     self._append_log("RX", text)
                     if is_lock_response(text):
-                        tip = describe_lock_state(text)
-                        if tip:
-                            self._append_log("INFO", tip)
+                        if not self._login_lock_blocked:
+                            tip = describe_lock_state(text)
+                            if tip:
+                                self._append_log("INFO", tip)
                         self._auto_login_on_lock()
                         continue
                     if is_unlock_response(text):
                         self._login_ok = True
+                        self._login_lock_blocked = False
                         self._auto_login_pending = False
                         self._login_lock_retries = 0
                         if self._login_retry_after_id is not None:
