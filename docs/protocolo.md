@@ -15,9 +15,24 @@ Texto extraído: [Comados_extracted.txt](Comados_extracted.txt)
 
 Medidores y cabeceras se completan a **12 dígitos** con ceros a la izquierda.
 
-## Conexión por IP (TCP) — experimental
+## Conexión por IP (TCP)
 
-Innovación de la app (no está en `Comados.doc`): mismos comandos ASCII por **socket TCP** en lugar del cable COM.
+Tras `UnLock` la app lanza una **sonda multi-ruta**:
+
+1. `VER` y `O` **sin** `QUIT` (algunos gateways rechazan QUIT pero aceptan consulta)
+2. `QUIT` + `VER` (como en COM / convertidor transparente)
+3. Reintento con fin de línea **CR** solo (`\r`)
+
+| Resultado | Modo | Comportamiento |
+|-----------|------|----------------|
+| Respuesta útil en alguna ruta | **TCP completo** | Mantenimiento por IP; guarda estrategia (`no_quit` / `standard` / `cr`) |
+| Solo `NO` | **TCP limitado** | Solo Login / QUIT / comando libre |
+
+Botones: **Reprobar canal TCP** · **Diagnóstico IP profundo** (mapa QUIT/VER/O/i/WAKE).
+
+Si el puerto solo implementa UnLock, no hay forma de inventar mantenimiento por software: hace falta COM, otro puerto TCP, o convertidor RS232↔Ethernet en modo **raw/transparente**.
+
+
 
 | Parámetro | Valor |
 |-----------|--------|

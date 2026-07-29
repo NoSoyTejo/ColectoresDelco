@@ -139,6 +139,13 @@ class AppWindow(ctk.CTk):
         self._login_lock_blocked = False
         self._login_ok = False
         self._login_retry_after_id: Optional[str] = None
+        self._tcp_lock_recovery_done = False
+        # Capacidad del canal: unknown | full | login_only (TCP gateway parcial).
+        self._channel_cap = "unknown"
+        # Estrategia TCP de mantenimiento: None | "standard" | "no_quit" | "cr"
+        self._tcp_strategy: Optional[str] = None
+        self._line_ending_override: Optional[str] = None
+        self._maint_buttons: list = []
         self._status_idle = "Desconectado — elija COM o IP y pulse Conectar"
 
         self._build_ui()
@@ -276,8 +283,39 @@ class AppWindow(ctk.CTk):
 
         self.status_var = ctk.StringVar(value=self._status_idle)
         ctk.CTkLabel(conn, textvariable=self.status_var, anchor="w").grid(
-            row=2, column=0, padx=12, pady=(4, 10), sticky="ew"
+            row=2, column=0, padx=12, pady=(2, 2), sticky="ew"
         )
+        self.channel_var = ctk.StringVar(value="")
+        self.channel_label = ctk.CTkLabel(
+            conn,
+            textvariable=self.channel_var,
+            anchor="w",
+            text_color=("gray30", "gray70"),
+            wraplength=900,
+            justify="left",
+        )
+        self.channel_label.grid(row=3, column=0, padx=12, pady=(0, 4), sticky="ew")
+        tcp_btns = ctk.CTkFrame(conn, fg_color="transparent")
+        tcp_btns.grid(row=4, column=0, padx=12, pady=(0, 10), sticky="w")
+        self.btn_reprobe = ctk.CTkButton(
+            tcp_btns,
+            text="Reprobar canal TCP",
+            width=150,
+            height=28,
+            command=self._reprobe_tcp_channel,
+        )
+        self.btn_reprobe.pack(side="left", padx=(0, 8))
+        self.btn_tcp_deep = ctk.CTkButton(
+            tcp_btns,
+            text="Diagnóstico IP profundo",
+            width=170,
+            height=28,
+            command=self._start_tcp_deep_probe,
+        )
+        self.btn_tcp_deep.pack(side="left")
+        self.btn_reprobe.pack_forget()
+        self.btn_tcp_deep.pack_forget()
+        self._tcp_btns_row = tcp_btns
         self._apply_mode_visibility()
 
         # --- Cuerpo: historial (izq) | trabajo (der) ---
@@ -361,8 +399,8 @@ class AppWindow(ctk.CTk):
         ctk.CTkLabel(cmds, text="1. Flujo base", font=ctk.CTkFont(weight="bold")).grid(
             row=4, column=0, columnspan=2, padx=8, pady=(8, 4), sticky="w"
         )
-        self._cmd_btn(cmds, 5, 0, "QUIT", lambda: self._send_one(CMD_QUIT))
-        self._cmd_btn(cmds, 5, 1, "Login", lambda: self._send_one(CMD_LOGIN))
+        self._cmd_btn(cmds, 5, 0, "QUIT", lambda: self._send_one(CMD_QUIT), maintenance=False)
+        self._cmd_btn(cmds, 5, 1, "Login", lambda: self._send_one(CMD_LOGIN), maintenance=False)
         self._cmd_btn(cmds, 6, 0, "Forzar lecturas", self._do_quit_wake_zoom)
         self._cmd_btn(cmds, 6, 1, "Diagnóstico", self._do_quick_diag)
 
@@ -387,12 +425,13 @@ class AppWindow(ctk.CTk):
         self._cmd_btn(cmds, 14, 0, "Versión", lambda: self._send_one(CMD_VERSION))
         self._cmd_btn(cmds, 14, 1, "Cantidad", self._do_count_meters)
         self._cmd_btn(cmds, 15, 0, "Reiniciar K", self._do_restart_k)
-        self._cmd_btn(cmds, 15, 1, "Ir a Reloj", lambda: self.tabview.set("Reloj"))
+        self._cmd_btn(cmds, 15, 1, "Ir a Reloj", lambda: self.tabview.set("Reloj"), maintenance=False)
 
         note = ctk.CTkLabel(
             cmds,
-            text="Flujo típico: QUIT → comando → Forzar lecturas (WAKE+ZOOM).\n"
-            "Horarios en pestaña Reloj. Use Cancelar si una secuencia se atasca.",
+            text="Flujo típico: QUIT → comando → Forzar lecturas.\n"
+            "Por IP: la app detecta si el gateway es transparente (sonda VER).\n"
+            "Comando libre (izq.) siempre disponible para probar.",
             wraplength=340,
             justify="left",
             text_color=("gray40", "gray60"),
@@ -415,10 +454,356 @@ class AppWindow(ctk.CTk):
         self.bulk_tab = BulkLoadTab(tab_bulk, self)
         self.bulk_tab.pack(fill="both", expand=True)
 
-    def _cmd_btn(self, parent: Any, row: int, col: int, text: str, command: Any) -> None:
-        ctk.CTkButton(parent, text=text, height=32, command=command).grid(
-            row=row, column=col, padx=5, pady=3, sticky="ew"
+    def _cmd_btn(
+        self,
+        parent: Any,
+        row: int,
+        col: int,
+        text: str,
+        command: Any,
+        *,
+        maintenance: bool = True,
+    ) -> None:
+        btn = ctk.CTkButton(parent, text=text, height=32, command=command)
+        btn.grid(row=row, column=col, padx=5, pady=3, sticky="ew")
+        if maintenance:
+            self._maint_buttons.append(btn)
+
+    def _set_channel_cap(self, cap: str) -> None:
+        """unknown | full | login_only"""
+        self._channel_cap = cap
+        limited = cap == "login_only"
+        state = "disabled" if limited else "normal"
+        for btn in self._maint_buttons:
+            try:
+                btn.configure(state=state)
+            except Exception:
+                pass
+        if hasattr(self, "clock_tab") and hasattr(self.clock_tab, "set_maintenance_enabled"):
+            self.clock_tab.set_maintenance_enabled(not limited)
+        if hasattr(self, "meters_tab") and hasattr(self.meters_tab, "set_maintenance_enabled"):
+            self.meters_tab.set_maintenance_enabled(not limited)
+        if hasattr(self, "bulk_tab") and hasattr(self.bulk_tab, "set_maintenance_enabled"):
+            self.bulk_tab.set_maintenance_enabled(not limited)
+
+        if not self.client.is_connected:
+            self.channel_var.set("")
+            self._hide_tcp_probe_buttons()
+            return
+        if cap == "login_only":
+            strat = f" (estrategia: {self._tcp_strategy})" if self._tcp_strategy else ""
+            self.channel_var.set(
+                "Canal TCP limitado: solo Login (UnLock). "
+                "Mantenimiento deshabilitado — use COM, o Diagnóstico IP profundo "
+                f"para probar rutas alternativas.{strat}"
+            )
+            self.channel_label.configure(text_color=("#9A5B00", "#E6A23C"))
+            if self._is_tcp_mode():
+                self._show_tcp_probe_buttons()
+        elif cap == "full":
+            if self._is_tcp_mode():
+                tip = {
+                    "no_quit": "sin QUIT previo",
+                    "cr": "fin de línea CR",
+                    "standard": "QUIT+comandos (como COM)",
+                }.get(self._tcp_strategy or "standard", self._tcp_strategy or "standard")
+                self.channel_var.set(
+                    f"Canal TCP completo ({tip}) — mantenimiento por IP habilitado."
+                )
+                self.channel_label.configure(text_color=("#1E7A3A", "#3DD68C"))
+                self._show_tcp_probe_buttons()
+            else:
+                self.channel_var.set("Canal COM completo — mantenimiento disponible.")
+                self.channel_label.configure(text_color=("gray30", "gray70"))
+                self._hide_tcp_probe_buttons()
+        else:
+            self.channel_var.set("Canal: detectando capacidad…")
+            self.channel_label.configure(text_color=("gray30", "gray70"))
+            self._hide_tcp_probe_buttons()
+        if self.client.is_connected and not self.command_queue.is_busy:
+            self.status_var.set(self._connection_status_text())
+
+    def _show_tcp_probe_buttons(self) -> None:
+        self.btn_reprobe.pack(side="left", padx=(0, 8))
+        self.btn_tcp_deep.pack(side="left")
+
+    def _hide_tcp_probe_buttons(self) -> None:
+        self.btn_reprobe.pack_forget()
+        self.btn_tcp_deep.pack_forget()
+
+    def _rx_is_maint_success(self, cmd: str, rx: str) -> bool:
+        """True si la respuesta indica que el gateway aceptó un comando de mantenimiento."""
+        text = (rx or "").strip()
+        up = text.upper()
+        if not text or up in ("NO", "LOCK", "UNLOCK"):
+            return False
+        c = (cmd or "").strip().upper()
+        if c == "VER":
+            return True
+        if c == "O":
+            return "AMRSW" in up or "IDNUM" in up or "=" in text
+        if c == "I":
+            return True
+        if up == "OK":
+            return True
+        if c.startswith("R") and any(ch.isdigit() for ch in text):
+            return True
+        return len(text) >= 4 and up != "NO"
+
+    def _adapt_maint_commands(self, commands: list) -> list:
+        """Ajusta secuencias al modo TCP descubierto (p. ej. omitir QUIT inicial)."""
+        if not self._is_tcp_mode() or self._tcp_strategy != "no_quit":
+            return list(commands)
+        out: list = []
+        skipping = True
+        for item in commands:
+            text = item.text if isinstance(item, QueuedCommand) else str(item)
+            if skipping and text.strip().upper() == "QUIT":
+                continue
+            skipping = False
+            out.append(item)
+        return out if out else list(commands)
+
+    def guard_maintenance(self, what: str = "esta acción") -> bool:
+        """False si el canal TCP solo admite login (bloquea mantenimiento con aviso)."""
+        if self._channel_cap != "login_only":
+            return True
+        self._append_log(
+            "WARN",
+            f"TCP limitado (solo UnLock): no se ejecuta «{what}». "
+            "Use cable COM, Diagnóstico IP profundo, o Reprobar canal si el convertidor "
+            "ya es transparente.",
         )
+        return False
+
+    def _reprobe_tcp_channel(self) -> None:
+        if not self.client.is_connected or not self._is_tcp_mode():
+            self._append_log("ERR", "Reprobar canal solo aplica con conexión IP activa")
+            return
+        if self.command_queue.is_busy:
+            self._append_log("ERR", "Hay una secuencia en curso. Espere o pulse Cancelar.")
+            return
+        if not self._login_ok:
+            self._append_log("WARN", "Haga Login (UnLock) antes de reprobar el canal")
+            return
+        self._start_tcp_capability_probe()
+
+    def _start_tcp_capability_probe(self) -> None:
+        """
+        Tras UnLock por TCP: prueba varias rutas para habilitar mantenimiento por IP.
+        1) VER y O sin QUIT  2) QUIT + VER  3) mismo con fin de línea CR
+        """
+        self._tcp_strategy = None
+        self._line_ending_override = None
+        self._set_channel_cap("unknown")
+        self._append_log(
+            "INFO",
+            "Sonda TCP multi-ruta: VER/O sin QUIT → QUIT+VER → reintento con CR…",
+        )
+        results: list = []
+
+        def on_step(cmd: str, rx: str) -> None:
+            results.append((cmd.strip(), (rx or "").strip(), self._line_ending_override or "default"))
+
+        def finish_limited() -> None:
+            self._line_ending_override = None
+            self._tcp_strategy = None
+            self._set_channel_cap("login_only")
+            self._append_log(
+                "WARN",
+                "TCP limitado: UnLock OK pero mantenimiento → NO en todas las rutas. "
+                "Botones deshabilitados. Pulse Diagnóstico IP profundo para mapa completo, "
+                "o use COM. Con convertidor transparente, Reprobar canal activará IP.",
+            )
+
+        def apply_success(strategy: str, detail: str) -> None:
+            self._line_ending_override = None
+            self._tcp_strategy = strategy
+            self._set_channel_cap("full")
+            self._append_log(
+                "INFO",
+                f"TCP completo detectado ({detail}). Estrategia: {strategy}. "
+                "Mantenimiento por IP habilitado.",
+            )
+
+        def after_cr_phase() -> None:
+            self._line_ending_override = None
+            if not self.client.is_connected:
+                return
+            for cmd, rx, _ending in results:
+                if self._rx_is_maint_success(cmd, rx):
+                    # Éxito solo visto en fase CR (últimas entradas con ending \\r)
+                    apply_success("cr", f"{cmd} → {rx}")
+                    return
+            finish_limited()
+
+        def start_cr_phase() -> None:
+            if not self.client.is_connected:
+                return
+            # Si ya hubo éxito en CRLF, no hace falta CR.
+            for cmd, rx, ending in results:
+                if ending == "default" and self._rx_is_maint_success(cmd, rx):
+                    return
+            self._append_log("INFO", "Sonda TCP: reintento con fin de línea CR (sin CRLF)…")
+            self._line_ending_override = "\r"
+            try:
+                self.command_queue.start(
+                    [
+                        QueuedCommand(
+                            CMD_VERSION, wait_rx=True, rx_timeout_ms=6000, write_timeout_s=2.0, abort_on_no=False
+                        ),
+                        QueuedCommand(
+                            CMD_COUNT_METERS,
+                            wait_rx=True,
+                            rx_timeout_ms=6000,
+                            write_timeout_s=2.0,
+                            abort_on_no=False,
+                        ),
+                    ],
+                    wait_rx=True,
+                    on_step=on_step,
+                    on_done=after_cr_phase,
+                )
+            except RuntimeError as exc:
+                self._append_log("ERR", str(exc))
+                finish_limited()
+
+        def after_main_phase() -> None:
+            if not self.client.is_connected:
+                return
+            # Preferir éxito sin QUIT (ruta más compatible con gateways parciales).
+            pre_quit_ok = False
+            post_quit_ok = False
+            seen_quit = False
+            detail = ""
+            for cmd, rx, ending in results:
+                if ending != "default":
+                    continue
+                if cmd.upper() == "QUIT":
+                    seen_quit = True
+                    continue
+                if self._rx_is_maint_success(cmd, rx):
+                    detail = f"{cmd} → {rx}"
+                    if seen_quit:
+                        post_quit_ok = True
+                    else:
+                        pre_quit_ok = True
+            if pre_quit_ok:
+                apply_success("no_quit", detail)
+                return
+            if post_quit_ok:
+                apply_success("standard", detail)
+                return
+            start_cr_phase()
+
+        try:
+            self.command_queue.start(
+                [
+                    QueuedCommand(
+                        CMD_VERSION, wait_rx=True, rx_timeout_ms=6000, write_timeout_s=2.0, abort_on_no=False
+                    ),
+                    QueuedCommand(
+                        CMD_COUNT_METERS,
+                        wait_rx=True,
+                        rx_timeout_ms=6000,
+                        write_timeout_s=2.0,
+                        abort_on_no=False,
+                    ),
+                    QueuedCommand(
+                        CMD_QUIT, wait_rx=True, rx_timeout_ms=6000, write_timeout_s=2.0, abort_on_no=False
+                    ),
+                    QueuedCommand(
+                        CMD_VERSION, wait_rx=True, rx_timeout_ms=6000, write_timeout_s=2.0, abort_on_no=False
+                    ),
+                ],
+                wait_rx=True,
+                on_step=on_step,
+                on_done=after_main_phase,
+            )
+        except RuntimeError as exc:
+            self._append_log("ERR", str(exc))
+            finish_limited()
+
+    def _start_tcp_deep_probe(self) -> None:
+        """Mapa de qué comandos acepta el puerto TCP (no aborta por NO)."""
+        if not self.client.is_connected or not self._is_tcp_mode():
+            self._append_log("ERR", "Diagnóstico IP solo con conexión TCP activa")
+            return
+        if self.command_queue.is_busy:
+            self._append_log("ERR", "Hay una secuencia en curso. Espere o pulse Cancelar.")
+            return
+        if not self._login_ok:
+            self._append_log("WARN", "Haga Login (UnLock) antes del diagnóstico")
+            return
+
+        self._append_log(
+            "INFO",
+            "Diagnóstico IP profundo: prueba segura de comandos (QUIT/VER/O/i/WAKE). "
+            "No borra base ni escribe reloj.",
+        )
+        results: list = []
+
+        def on_step(cmd: str, rx: str) -> None:
+            c = cmd.strip()
+            r = (rx or "").strip()
+            results.append((c, r))
+            ok = self._rx_is_maint_success(c, r)
+            mark = "OK" if ok else "NO/otro"
+            self._append_log("INFO", f"  · {c!r} → {r!r}  [{mark}]")
+
+        def on_done() -> None:
+            winners = [c for c, r in results if self._rx_is_maint_success(c, r)]
+            # Ignorar UnLock de un PWR accidental
+            winners = [c for c in winners if not c.upper().startswith("PWR")]
+            if winners:
+                # Inferir estrategia: si VER/O ganaron antes de QUIT → no_quit
+                strategy = "standard"
+                seen_quit = False
+                pre = False
+                for c, r in results:
+                    if c.strip().upper() == "QUIT":
+                        seen_quit = True
+                        continue
+                    if self._rx_is_maint_success(c, r):
+                        if not seen_quit:
+                            pre = True
+                if pre:
+                    strategy = "no_quit"
+                self._tcp_strategy = strategy
+                self._set_channel_cap("full")
+                self._append_log(
+                    "INFO",
+                    f"Diagnóstico: gateway acepta {', '.join(winners)}. "
+                    f"Estrategia {strategy} — mantenimiento por IP ACTIVADO.",
+                )
+            else:
+                self._tcp_strategy = None
+                self._set_channel_cap("login_only")
+                self._append_log(
+                    "WARN",
+                    "Diagnóstico: ningún comando de mantenimiento aceptado por este TCP. "
+                    "Causa típica: el puerto solo expone UnLock (no es puente serial transparente). "
+                    "Opciones: COM en sitio, convertidor RS232↔Ethernet en modo raw/transparente, "
+                    "u otro puerto TCP del equipo. La app no puede inventar un canal que el gateway no ofrece.",
+                )
+
+        soft = dict(wait_rx=True, rx_timeout_ms=7000, write_timeout_s=2.0, abort_on_no=False)
+        try:
+            self.command_queue.start(
+                [
+                    QueuedCommand(CMD_VERSION, **soft),
+                    QueuedCommand(CMD_COUNT_METERS, **soft),
+                    QueuedCommand(CMD_POLLING_SCHEDULE, **soft),
+                    QueuedCommand(CMD_QUIT, **soft),
+                    QueuedCommand(CMD_VERSION, **soft),
+                    QueuedCommand(CMD_WAKE, **soft),
+                ],
+                wait_rx=True,
+                on_step=on_step,
+                on_done=on_done,
+            )
+        except RuntimeError as exc:
+            self._append_log("ERR", str(exc))
 
     def _is_tcp_mode(self) -> bool:
         return self.mode_var.get() == "IP"
@@ -472,6 +857,10 @@ class AppWindow(ctk.CTk):
         return value.split(" — ", 1)[0].strip()
 
     def _current_line_ending(self) -> str:
+        if self._line_ending_override is not None:
+            return self._line_ending_override
+        if self._is_tcp_mode() and self._tcp_strategy == "cr":
+            return "\r"
         return self.ENDING_OPTIONS.get(self.ending_var.get(), "\r\n")
 
     def _refresh_ports(self) -> None:
@@ -490,6 +879,7 @@ class AppWindow(ctk.CTk):
         if active.is_connected:
             if self.command_queue.is_busy:
                 self.command_queue.cancel()
+            self._release_tcp_session_best_effort()
             active.disconnect()
             self._append_log("INFO", "Desconectado")
             return
@@ -514,8 +904,16 @@ class AppWindow(ctk.CTk):
             self.settings["tcp_port"] = port
             save_settings(self.settings)
             self._last_error_msg = ""
+            self._tcp_lock_recovery_done = False
             self._append_log("INFO", f"Conectado a {host}:{port} (TCP)")
-            self.after(400, self._send_initial_login)
+            self._append_log(
+                "INFO",
+                "Modo IP/TCP: tras UnLock la app sonda el gateway. "
+                "Si VER/O responden (como CCE16 transparente), mantenimiento por IP queda activo. "
+                "Si solo UnLock funciona, use COM o Diagnóstico IP profundo.",
+            )
+            # Dar tiempo al gateway a estabilizar la sesion antes del PWR.
+            self.after(1500, self._send_initial_login)
             return
 
         port = self._selected_port()
@@ -560,11 +958,16 @@ class AppWindow(ctk.CTk):
 
     def _connection_status_text(self) -> str:
         if self.tcp_client.is_connected:
-            return f"Conectado a {self.tcp_client.host}:{self.tcp_client.port} (TCP)"
+            host = f"{self.tcp_client.host}:{self.tcp_client.port}"
+            if self._channel_cap == "login_only":
+                return f"TCP {host} — limitado (solo login)"
+            if self._channel_cap == "full":
+                return f"TCP {host} — completo (mantenimiento OK)"
+            return f"TCP {host} — sondando canal…"
         if self.serial_client.is_connected:
             port = self.settings.get("port") or "COM"
             baud = self.settings.get("baudrate") or self.baud_var.get()
-            return f"Conectado a {port} @ {baud} baud"
+            return f"COM {port} @ {baud} baud"
         return self._status_idle
 
     def _on_queue_busy(self, busy: bool) -> None:
@@ -587,6 +990,17 @@ class AppWindow(ctk.CTk):
         else:
             self._append_log("INFO", "No hay secuencia en curso")
 
+    def _release_tcp_session_best_effort(self) -> None:
+        """Al desconectar por IP, intenta QUIT para no dejar la sesion ocupada."""
+        if not self._is_tcp_mode() or not self.tcp_client.is_connected:
+            return
+        try:
+            ending = self._current_line_ending()
+            self.tcp_client.send(format_command(CMD_QUIT, ending), write_timeout=1.0)
+            self._append_log("INFO", "TCP: enviado QUIT al desconectar (liberar sesion).")
+        except Exception:
+            pass
+
     def _reset_login_state(self) -> None:
         self._auto_login_pending = False
         self._login_lock_retries = 0
@@ -598,6 +1012,9 @@ class AppWindow(ctk.CTk):
             except Exception:
                 pass
             self._login_retry_after_id = None
+
+    def _max_login_lock_retries(self) -> int:
+        return 5 if self._is_tcp_mode() else 3
 
     def _send_initial_login(self) -> None:
         if not self.client.is_connected or self.command_queue.is_busy:
@@ -618,12 +1035,21 @@ class AppWindow(ctk.CTk):
                     "Login no completo (no hubo UnLock). "
                     f"Ultima respuesta: {self.command_queue.last_response!r}. "
                     "No se envia QUIT automatico. "
-                    "Espere 2 s y pulse Login una vez, o Desconectar/Conectar. "
-                    "Cierre RemoteCOM u otra app que use el COM.",
+                    "Por IP suele ser sesion ocupada: Desconecte, espere 10 s, "
+                    "cierre RemoteCOM/otra instancia, vuelva a Conectar y pulse Login. "
+                    "En COM: cierre quien use el puerto.",
                 )
                 return
             self._login_ok = True
             self._login_lock_blocked = False
+            if self._is_tcp_mode():
+                self._append_log(
+                    "INFO",
+                    "Login OK por IP — iniciando sonda de capacidad del gateway…",
+                )
+                self._start_tcp_capability_probe()
+                return
+            self._set_channel_cap("full")
             self._append_log(
                 "INFO",
                 "Tras login OK: enviando QUIT para modo mantenimiento…",
@@ -656,14 +1082,109 @@ class AppWindow(ctk.CTk):
             except Exception:
                 pass
             self._login_retry_after_id = None
+
+        if self._is_tcp_mode() and not self._tcp_lock_recovery_done:
+            self._tcp_lock_recovery_done = True
+            self._append_log(
+                "WARN",
+                "Lock persistente por IP. Suele ser sesion ocupada (otro cliente, "
+                "instancia anterior o RemoteCOM), no falla de password. "
+                "Intentando liberar: QUIT + espera + Login…",
+            )
+            if self.command_queue.is_busy:
+                self.command_queue.cancel()
+            self.after(600, self._tcp_lock_recovery)
+            return
+
+        tip = (
+            "Por IP: Desconecte, espere 10–15 s, cierre RemoteCOM u otra app/instancia, "
+            "Conecte de nuevo y pulse Login. Este host ya dio UnLock antes — no es "
+            "limite de mantenimiento, es sesion bloqueada."
+            if self._is_tcp_mode()
+            else "Espere 3 s y pulse Login, o Desconectar/Conectar. "
+            "Cierre RemoteCOM si esta abierto."
+        )
         self._append_log(
             "WARN",
-            "Lock persistente: PWR666666 no produjo UnLock (3 reintentos). "
-            "Auto-login pausado. Espere 3 s y pulse Login, o Desconectar/Conectar. "
-            "Cierre RemoteCOM si esta abierto. No pulse VER/O/lectura hasta tener UnLock.",
+            f"Lock persistente: PWR666666 no produjo UnLock. Auto-login pausado. {tip} "
+            "No pulse VER/O/lectura hasta tener UnLock.",
         )
         if self.command_queue.is_busy:
             self.command_queue.cancel()
+
+    def _tcp_lock_recovery(self) -> None:
+        """QUIT (si responde) + pausa + nuevo PWR — libera sesion TCP a medias."""
+        if not self.client.is_connected or not self._is_tcp_mode():
+            return
+        if self.command_queue.is_busy:
+            self.after(800, self._tcp_lock_recovery)
+            return
+
+        def after_quit() -> None:
+            if not self.client.is_connected:
+                return
+            self._append_log("INFO", "TCP: espera 3 s tras QUIT y reintenta Login…")
+
+            def do_login() -> None:
+                if not self.client.is_connected or self.command_queue.is_busy:
+                    return
+                self._login_lock_blocked = False
+                self._login_lock_retries = 0
+                self._auto_login_pending = True
+                self._append_log("INFO", "TCP recuperacion: enviando PWR666666…")
+                try:
+                    self.command_queue.start(
+                        [
+                            QueuedCommand(
+                                CMD_LOGIN, wait_rx=True, rx_timeout_ms=12000, write_timeout_s=2.0
+                            )
+                        ],
+                        wait_rx=True,
+                        on_done=self._after_tcp_recovery_login,
+                    )
+                except RuntimeError as exc:
+                    self._append_log("ERR", str(exc))
+                    self._auto_login_pending = False
+
+            self.after(3000, do_login)
+
+        self._append_log("INFO", "TCP recuperacion: enviando QUIT…")
+        try:
+            self.command_queue.start(
+                [
+                    QueuedCommand(
+                        CMD_QUIT,
+                        wait_rx=True,
+                        rx_timeout_ms=6000,
+                        write_timeout_s=2.0,
+                        abort_on_no=False,
+                    )
+                ],
+                wait_rx=True,
+                on_done=after_quit,
+            )
+        except RuntimeError as exc:
+            self._append_log("ERR", str(exc))
+            after_quit()
+
+    def _after_tcp_recovery_login(self) -> None:
+        self._auto_login_pending = False
+        if not self.client.is_connected:
+            return
+        last = (self.command_queue.last_response or "").strip().lower()
+        if self._login_ok or "unlock" in last:
+            self._login_ok = True
+            self._login_lock_blocked = False
+            self._append_log("INFO", "TCP recuperacion OK (UnLock). Iniciando sonda…")
+            self._start_tcp_capability_probe()
+            return
+        self._login_lock_blocked = True
+        self._append_log(
+            "WARN",
+            f"TCP recuperacion sin UnLock (ultima: {self.command_queue.last_response!r}). "
+            "Desconecte, espere 15 s, cierre otras apps, Conecte y Login. "
+            "Si COM3 esta en uso por RemoteCOM hacia el mismo colector, cierrenlo.",
+        )
 
     def _auto_login_on_lock(self) -> None:
         """
@@ -687,14 +1208,16 @@ class AppWindow(ctk.CTk):
         if self._login_retry_after_id is not None:
             return
 
-        if self._login_lock_retries >= 3:
+        max_retries = self._max_login_lock_retries()
+        if self._login_lock_retries >= max_retries:
             self._fail_login_lock_loop()
             return
 
         self._login_lock_retries += 1
         self._auto_login_pending = True
         attempt = self._login_lock_retries
-        delay_ms = 2000 * attempt  # 2s, 4s, 6s
+        # TCP: esperas mas largas (sesiones lentas / gateway ocupado).
+        delay_ms = (3000 * attempt) if self._is_tcp_mode() else (2000 * attempt)
 
         waiting_login = (
             self.command_queue.is_waiting_rx
@@ -712,14 +1235,14 @@ class AppWindow(ctk.CTk):
             ):
                 self._append_log(
                     "INFO",
-                    f"Reintento login {attempt}/3 tras Lock (espera {delay_ms} ms)…",
+                    f"Reintento login {attempt}/{max_retries} tras Lock (espera {delay_ms} ms)…",
                 )
                 self.command_queue.send_login_for_lock(CMD_LOGIN)
                 return
             if self.command_queue.is_waiting_rx:
                 self._append_log(
                     "INFO",
-                    f"Lock: enviando PWR666666 (intento {attempt}/3, tras {delay_ms} ms)…",
+                    f"Lock: enviando PWR666666 (intento {attempt}/{max_retries}, tras {delay_ms} ms)…",
                 )
                 self.command_queue.send_login_for_lock(CMD_LOGIN)
                 return
@@ -727,7 +1250,9 @@ class AppWindow(ctk.CTk):
                 self._append_log("WARN", "Cola ocupada: no se pudo reenviar login")
                 self._auto_login_pending = False
                 return
-            self._append_log("INFO", f"Login automatico PWR666666 (intento {attempt}/3)…")
+            self._append_log(
+                "INFO", f"Login automatico PWR666666 (intento {attempt}/{max_retries})…"
+            )
             try:
                 self.command_queue.start(
                     [QueuedCommand(CMD_LOGIN, wait_rx=True, rx_timeout_ms=10000, write_timeout_s=2.0)],
@@ -740,16 +1265,18 @@ class AppWindow(ctk.CTk):
             self._append_log(
                 "INFO",
                 f"PWR666666 respondio Lock — esperando {delay_ms} ms antes de reintentar "
-                f"({attempt}/3)…",
+                f"({attempt}/{max_retries})…",
             )
         elif waiting_other:
             self._append_log(
                 "INFO",
                 f"Lock durante {self.command_queue.last_command!r} — "
-                f"login en {delay_ms} ms ({attempt}/3)…",
+                f"login en {delay_ms} ms ({attempt}/{max_retries})…",
             )
         else:
-            self._append_log("INFO", f"Lock recibido — login en {delay_ms} ms ({attempt}/3)…")
+            self._append_log(
+                "INFO", f"Lock recibido — login en {delay_ms} ms ({attempt}/{max_retries})…"
+            )
 
         self._login_retry_after_id = self.after(delay_ms, _do_retry)
 
@@ -791,7 +1318,13 @@ class AppWindow(ctk.CTk):
         if self.command_queue.is_busy:
             self._append_log("ERR", "Hay una secuencia en curso. Espere o pulse Cancelar.")
             return
-        if command.strip().upper() == CMD_LOGIN.upper():
+        cmd_u = command.strip().upper()
+        is_login = cmd_u.startswith("PWR")
+        is_quit = cmd_u == "QUIT"
+        if not is_login and not is_quit:
+            if not self.guard_maintenance(command.strip()):
+                return
+        if is_login:
             self._reset_login_state()
             self._auto_login_pending = True
             self._append_log("INFO", "Login manual PWR666666…")
@@ -806,6 +1339,18 @@ class AppWindow(ctk.CTk):
             if command.strip().upper() == CMD_LOGIN.upper():
                 self._auto_login_pending = False
 
+    def queue_start(
+        self,
+        commands: list,
+        *,
+        wait_rx: bool = True,
+        on_done: Optional[Any] = None,
+        on_step: Optional[Any] = None,
+    ) -> None:
+        """Inicia la cola aplicando estrategia TCP (p. ej. omitir QUIT inicial)."""
+        adapted = self._adapt_maint_commands(list(commands))
+        self.command_queue.start(adapted, wait_rx=wait_rx, on_done=on_done, on_step=on_step)
+
     def _send_many(
         self,
         commands: Iterable[str],
@@ -813,7 +1358,7 @@ class AppWindow(ctk.CTk):
         wait_rx: bool = True,
         on_done: Optional[Any] = None,
     ) -> None:
-        cmds = [c for c in commands if c]
+        cmds = self._adapt_maint_commands([c for c in commands if c])
         if not cmds:
             return
         if not self.client.is_connected:
@@ -847,6 +1392,8 @@ class AppWindow(ctk.CTk):
 
     def _maintenance_sequence(self, *mid_commands: str) -> None:
         """QUIT → comando(s) → WAKE → ZOOM, esperando respuesta en cada paso (Comados.doc)."""
+        if not self.guard_maintenance("mantenimiento"):
+            return
         from ui.extra_tabs import WAKE_SLOW, ZOOM_CMD
 
         cmds: list = [
@@ -858,7 +1405,17 @@ class AppWindow(ctk.CTk):
                     QueuedCommand(mid, wait_rx=True, rx_timeout_ms=10000, write_timeout_s=2.0)
                 )
         cmds.extend([WAKE_SLOW, ZOOM_CMD])
-        self._send_many(cmds, wait_rx=True)
+        cmds = self._adapt_maint_commands(cmds)
+        if self.command_queue.is_busy:
+            self._append_log("ERR", "Hay una secuencia en curso. Espere o pulse Cancelar.")
+            return
+        if not self.client.is_connected:
+            self._append_log("ERR", "No hay conexión activa")
+            return
+        try:
+            self.command_queue.start(cmds, wait_rx=True)
+        except RuntimeError as exc:
+            self._append_log("ERR", str(exc))
 
     def _do_direct_read(self) -> None:
         meter = self._require_meter()
@@ -938,6 +1495,8 @@ class AppWindow(ctk.CTk):
           - Cualquier otro valor (10000000 es solo ejemplo del manual) →
             QUIT → k=10100000 → O → QUIT → WAKE → ZOOM
         """
+        if not self.guard_maintenance("Reiniciar K"):
+            return
         from ui.extra_tabs import WAKE_SLOW, ZOOM_CMD
 
         if not self.client.is_connected:
@@ -1133,6 +1692,8 @@ class AppWindow(ctk.CTk):
 
     def _do_quit_wake_zoom(self) -> None:
         """§9 Comados.doc: forzar actualización de lecturas."""
+        if not self.guard_maintenance("Forzar lecturas"):
+            return
         from ui.extra_tabs import WAKE_SLOW, ZOOM_CMD
 
         self._append_log("INFO", "Forzar lecturas: QUIT → WAKE → ZOOM")
@@ -1140,6 +1701,8 @@ class AppWindow(ctk.CTk):
 
     def _do_count_meters(self) -> None:
         """§7 Comados.doc: QUIT → O."""
+        if not self.guard_maintenance("Cantidad (O)"):
+            return
         self._send_many(
             [CMD_QUIT, QueuedCommand(CMD_COUNT_METERS, multiline_ms=2000, rx_timeout_ms=20000)],
             wait_rx=True,
@@ -1147,11 +1710,15 @@ class AppWindow(ctk.CTk):
 
     def _do_delete_base(self) -> None:
         """§13 Comados.doc: QUIT (OK) → DEL."""
+        if not self.guard_maintenance("Borrar base"):
+            return
         self._append_log("WARN", "Borrar base: QUIT → DEL (elimina todos los medidores)")
         self._send_many([CMD_QUIT, CMD_DELETE_BASE], wait_rx=True)
 
     def _do_quick_diag(self) -> None:
-        """VER + QUIT + O (version y estado AMRsw / IDnum)."""
+        """QUIT → VER → O (version y estado AMRsw / IDnum)."""
+        if not self.guard_maintenance("Diagnóstico"):
+            return
         if not self.client.is_connected:
             self._append_log("ERR", "Conecte primero al colector")
             return
@@ -1312,6 +1879,22 @@ class AppWindow(ctk.CTk):
             self.host_entry.configure(state="normal")
             self.tcp_port_entry.configure(state="normal")
             self.ending_menu.configure(state="normal")
+            self._channel_cap = "unknown"
+            self._tcp_strategy = None
+            self._line_ending_override = None
+            self.channel_var.set("")
+            self._hide_tcp_probe_buttons()
+            for btn in self._maint_buttons:
+                try:
+                    btn.configure(state="normal")
+                except Exception:
+                    pass
+            if hasattr(self, "clock_tab") and hasattr(self.clock_tab, "set_maintenance_enabled"):
+                self.clock_tab.set_maintenance_enabled(True)
+            if hasattr(self, "meters_tab") and hasattr(self.meters_tab, "set_maintenance_enabled"):
+                self.meters_tab.set_maintenance_enabled(True)
+            if hasattr(self, "bulk_tab") and hasattr(self.bulk_tab, "set_maintenance_enabled"):
+                self.bulk_tab.set_maintenance_enabled(True)
 
     def _show_help(self) -> None:
         dialog = ctk.CTkToplevel(self)

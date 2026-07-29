@@ -311,7 +311,11 @@ class SerialCommandQueue:
         self._active_rx_timeout_ms = self._rx_timeout_ms
         self._aborted = True
         self._set_busy(False)
-        self._on_log("WARN", "Secuencia interrumpida por error de comunicación")
+        self._on_log(
+            "WARN",
+            "Secuencia interrumpida por error de comunicación. "
+            "Si el COM sigue colgado: Desconectar y Conectar.",
+        )
 
     def _arm_rx_timeout(self) -> None:
         if not self._waiting_rx:
@@ -356,15 +360,37 @@ class SerialCommandQueue:
 
     def _dispatch_send(self, text: str, write_timeout_s: float, *, after_retry: bool) -> None:
         gen = self._send_gen
+        state = {"done": False}
+        # Log antes del hilo: si el COM se cuelga en write, al menos se ve qué quedó pendiente.
+        self._on_log("INFO", f"Enviando {text!r}…")
+
+        def _finish(ok: bool) -> None:
+            if state["done"] or gen != self._send_gen:
+                return
+            state["done"] = True
+            self._after_send(gen, ok, text, after_retry=after_retry)
 
         def worker() -> None:
             try:
                 ok = bool(self._send(text, write_timeout_s))
             except Exception:
                 ok = False
-            # Volver al hilo de UI vía schedule (Tk after).
-            self._schedule(0, lambda: self._after_send(gen, ok, text, after_retry=after_retry))
+            self._schedule(0, lambda: _finish(ok))
 
+        def watchdog() -> None:
+            if state["done"] or gen != self._send_gen or not self._busy:
+                return
+            state["done"] = True
+            self._on_log(
+                "WARN",
+                f"Envio de {text!r} no termino a tiempo (COM puede estar colgado). "
+                "Pulse Cancelar; si sigue, Desconectar/Conectar.",
+            )
+            self.on_send_failed()
+
+        # write_timeout efectivo ~2.5 s en serial; margen amplio para el hilo + UI.
+        watchdog_ms = int(max(float(write_timeout_s), 2.5) * 1000) + 3000
+        self._schedule(watchdog_ms, watchdog)
         threading.Thread(target=worker, name="SerialSend", daemon=True).start()
 
     def _after_send(self, gen: int, ok: bool, text: str, *, after_retry: bool) -> None:

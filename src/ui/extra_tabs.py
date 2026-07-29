@@ -5,7 +5,7 @@ from __future__ import annotations
 import tkinter.filedialog as filedialog
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
 import customtkinter as ctk
 
@@ -69,6 +69,7 @@ class ClockTab(ctk.CTkScrollableFrame):
         self._selected_index: Optional[int] = None
         self._polling_capture = False
         self._polling_lines: List[str] = []
+        self._maint_widgets: List[Any] = []
 
         self.grid_columnconfigure(0, weight=1)
 
@@ -95,12 +96,13 @@ class ClockTab(ctk.CTkScrollableFrame):
 
         clk_btns = ctk.CTkFrame(clock_box, fg_color="transparent")
         clk_btns.grid(row=3, column=0, columnspan=3, padx=10, pady=(6, 10), sticky="ew")
-        ctk.CTkButton(clk_btns, text="Sync hora", width=110, height=32, command=self._sync_system_time).pack(
-            side="left", padx=(0, 8)
+        b_sync = ctk.CTkButton(clk_btns, text="Sync hora", width=110, height=32, command=self._sync_system_time)
+        b_sync.pack(side="left", padx=(0, 8))
+        b_idx0 = ctk.CTkButton(
+            clk_btns, text="Fecha índice 0", width=130, height=32, command=self._read_collector_clock
         )
-        ctk.CTkButton(clk_btns, text="Fecha índice 0", width=130, height=32, command=self._read_collector_clock).pack(
-            side="left", padx=8
-        )
+        b_idx0.pack(side="left", padx=8)
+        self._maint_widgets.extend([b_sync, b_idx0])
         ctk.CTkLabel(
             clock_box,
             text="§12: Sync envía C… (hora del PC). Fecha índice 0 lee la última lectura almacenada (R0000F0312).",
@@ -114,9 +116,11 @@ class ClockTab(ctk.CTkScrollableFrame):
         ctk.CTkEntry(clock_box, textvariable=self.clock_var).grid(
             row=4, column=1, columnspan=2, padx=8, pady=4, sticky="ew"
         )
-        ctk.CTkButton(clock_box, text="Aplicar C", width=100, height=30, command=self._apply_clock).grid(
-            row=5, column=1, padx=8, pady=(0, 10), sticky="w"
+        self.btn_apply_clock = ctk.CTkButton(
+            clock_box, text="Aplicar C", width=100, height=30, command=self._apply_clock
         )
+        self.btn_apply_clock.grid(row=5, column=1, padx=8, pady=(0, 10), sticky="w")
+        self._maint_widgets.append(self.btn_apply_clock)
 
         # --- 2. Time for reading (polling) ---
         poll_box = ctk.CTkFrame(self)
@@ -169,10 +173,11 @@ class ClockTab(ctk.CTkScrollableFrame):
 
         io_btns = ctk.CTkFrame(poll_box, fg_color="transparent")
         io_btns.grid(row=5, column=0, padx=10, pady=(0, 10), sticky="ew")
-        ctk.CTkButton(
+        self.btn_download = ctk.CTkButton(
             io_btns, text="Descargar", width=110, height=32, command=self._download_schedules
-        ).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(
+        )
+        self.btn_download.pack(side="left", padx=(0, 8))
+        self.btn_upload = ctk.CTkButton(
             io_btns,
             text="Subir",
             width=110,
@@ -180,7 +185,9 @@ class ClockTab(ctk.CTkScrollableFrame):
             command=self._upload_schedules,
             fg_color=("#2B7A4B", "#1E5A35"),
             hover_color=("#236B40", "#174A2B"),
-        ).pack(side="left", padx=2)
+        )
+        self.btn_upload.pack(side="left", padx=2)
+        self._maint_widgets.extend([self.btn_download, self.btn_upload])
         ctk.CTkLabel(
             io_btns,
             text="Descargar = i   ·   Subir = I… (§11, experimental)",
@@ -203,14 +210,20 @@ class ClockTab(ctk.CTkScrollableFrame):
         )
         ss_btns = ctk.CTkFrame(ss_box, fg_color="transparent")
         ss_btns.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="ew")
-        ctk.CTkButton(ss_btns, text="QUIT", width=80, height=30, command=lambda: self.app._send_one(CMD_QUIT)).pack(
-            side="left", padx=(0, 6)
+        b_quit = ctk.CTkButton(
+            ss_btns, text="QUIT", width=80, height=30, command=lambda: self.app._send_one(CMD_QUIT)
         )
-        ctk.CTkButton(ss_btns, text="WAKE", width=80, height=30, command=self._send_wake).pack(side="left", padx=6)
-        ctk.CTkButton(ss_btns, text="ZOOM", width=80, height=30, command=self._send_zoom).pack(side="left", padx=6)
-        ctk.CTkButton(ss_btns, text="Forzar (Q+W+Z)", width=130, height=30, command=self._startup_full).pack(
-            side="left", padx=6
+        b_quit.pack(side="left", padx=(0, 6))
+        b_wake = ctk.CTkButton(ss_btns, text="WAKE", width=80, height=30, command=self._send_wake)
+        b_wake.pack(side="left", padx=6)
+        b_zoom = ctk.CTkButton(ss_btns, text="ZOOM", width=80, height=30, command=self._send_zoom)
+        b_zoom.pack(side="left", padx=6)
+        b_force = ctk.CTkButton(
+            ss_btns, text="Forzar (Q+W+Z)", width=130, height=30, command=self._startup_full
         )
+        b_force.pack(side="left", padx=6)
+        self._maint_widgets.extend([b_wake, b_zoom, b_force])
+        # QUIT queda habilitado también en TCP limitado.
 
         ctk.CTkLabel(
             ss_box,
@@ -222,6 +235,14 @@ class ClockTab(ctk.CTkScrollableFrame):
         self._tick_pc_time()
         self.after(1000, self._schedule_tick)
 
+    def set_maintenance_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for w in self._maint_widgets:
+            try:
+                w.configure(state=state)
+            except Exception:
+                pass
+
     def _schedule_tick(self) -> None:
         self._tick_pc_time()
         self.after(1000, self._schedule_tick)
@@ -231,6 +252,8 @@ class ClockTab(ctk.CTkScrollableFrame):
         self.pc_time_var.set(now.strftime("%Y-%m-%d %H:%M:%S"))
 
     def _sync_system_time(self) -> None:
+        if not self.app.guard_maintenance("Sync hora"):
+            return
         if not self.app.client.is_connected:
             self.app._append_log("ERR", "Conecte primero al colector")
             return
@@ -255,6 +278,8 @@ class ClockTab(ctk.CTkScrollableFrame):
         self.app._append_log("INFO", "Sync System Time → QUIT + C… enviado al colector")
 
     def _read_collector_clock(self) -> None:
+        if not self.app.guard_maintenance("Fecha índice 0"):
+            return
         if not self.app.client.is_connected:
             self.app._append_log("ERR", "Conecte primero al colector")
             return
@@ -291,7 +316,7 @@ class ClockTab(ctk.CTkScrollableFrame):
             self.app._append_log("ERR", "Hay una secuencia en curso")
             return
         try:
-            self.app.command_queue.start(
+            self.app.queue_start(
                 [CMD_QUIT, cmd_read_collector_clock()],
                 wait_rx=True,
                 on_step=on_step,
@@ -301,6 +326,8 @@ class ClockTab(ctk.CTkScrollableFrame):
             self.app._append_log("ERR", str(exc))
 
     def _apply_clock(self) -> None:
+        if not self.app.guard_maintenance("Aplicar C"):
+            return
         if not self.app.client.is_connected:
             self.app._append_log("ERR", "Conecte primero al colector")
             return
@@ -476,6 +503,8 @@ class ClockTab(ctk.CTkScrollableFrame):
             )
 
     def _download_schedules(self) -> None:
+        if not self.app.guard_maintenance("Descargar horarios"):
+            return
         if not self.app.client.is_connected:
             self.app._append_log("ERR", "Conecte primero al colector")
             return
@@ -518,7 +547,7 @@ class ClockTab(ctk.CTkScrollableFrame):
             self._apply_download_result(raw)
 
         try:
-            self.app.command_queue.start(
+            self.app.queue_start(
                 [CMD_QUIT, POLLING_DOWNLOAD],
                 wait_rx=True,
                 on_step=on_step,
@@ -529,6 +558,8 @@ class ClockTab(ctk.CTkScrollableFrame):
             self.app._append_log("ERR", str(exc))
 
     def _send_wake(self) -> None:
+        if not self.app.guard_maintenance("WAKE"):
+            return
         if not self.app.client.is_connected:
             self.app._append_log("ERR", "Conecte primero al colector")
             return
@@ -539,12 +570,16 @@ class ClockTab(ctk.CTkScrollableFrame):
         self.app._send_many([CMD_QUIT, WAKE_SLOW], wait_rx=True)
 
     def _send_zoom(self) -> None:
+        if not self.app.guard_maintenance("ZOOM"):
+            return
         if not self.app.client.is_connected:
             self.app._append_log("ERR", "Conecte primero al colector")
             return
         self.app._send_many([ZOOM_CMD], wait_rx=True)
 
     def _upload_schedules(self) -> None:
+        if not self.app.guard_maintenance("Subir horarios"):
+            return
         if not self.app.client.is_connected:
             self.app._append_log("ERR", "Conecte primero al colector")
             return
@@ -594,9 +629,11 @@ class ClockTab(ctk.CTkScrollableFrame):
                 self.poll_status.set("Subida finalizada — verifique con Descargar")
                 self.app._append_log("INFO", "Subida terminada. Pulse Descargar para verificar.")
 
-        self.app.command_queue.start(commands, on_done=on_done, wait_rx=True)
+        self.app.queue_start(commands, on_done=on_done, wait_rx=True)
 
     def _startup_full(self) -> None:
+        if not self.app.guard_maintenance("Forzar lecturas"):
+            return
         if not self.app.client.is_connected:
             self.app._append_log("ERR", "Conecte primero al colector")
             return
@@ -615,6 +652,7 @@ class MetersTab(ctk.CTkFrame):
         self._scan_index = 0
         self._scan_total = 0
         self._scan_active = False
+        self._maint_widgets: List[Any] = []
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(4, weight=1)
@@ -629,16 +667,16 @@ class MetersTab(ctk.CTkFrame):
 
         self.count_var = ctk.StringVar(value="Cantidad: ?")
         ctk.CTkLabel(top, textvariable=self.count_var).grid(row=1, column=0, padx=8, pady=6, sticky="w")
-        ctk.CTkButton(top, text="Cantidad (O)", width=110, height=30, command=self._fetch_count).grid(
-            row=1, column=1, padx=4, pady=6, sticky="w"
+        self.btn_count = ctk.CTkButton(
+            top, text="Cantidad (O)", width=110, height=30, command=self._fetch_count
         )
+        self.btn_count.grid(row=1, column=1, padx=4, pady=6, sticky="w")
 
         ctk.CTkLabel(top, text="Máx. escaneo:").grid(row=1, column=2, padx=(16, 4), pady=6, sticky="e")
         self.max_var = ctk.StringVar(value="50")
         ctk.CTkEntry(top, textvariable=self.max_var, width=60).grid(row=1, column=3, padx=4, pady=6, sticky="w")
-        ctk.CTkButton(top, text="Escanear", width=100, height=30, command=self._scan_all).grid(
-            row=1, column=4, padx=8, pady=6, sticky="w"
-        )
+        self.btn_scan = ctk.CTkButton(top, text="Escanear", width=100, height=30, command=self._scan_all)
+        self.btn_scan.grid(row=1, column=4, padx=8, pady=6, sticky="w")
 
         # Lectura directa por número de medidor
         ctk.CTkLabel(top, text="Medidor:").grid(row=2, column=0, padx=8, pady=6, sticky="e")
@@ -650,15 +688,20 @@ class MetersTab(ctk.CTkFrame):
         )
         self.meter_entry.grid(row=2, column=1, padx=4, pady=6, sticky="w")
         self.meter_entry.bind("<Return>", lambda _e: self._read_by_meter_id())
-        ctk.CTkButton(top, text="Leer medidor", width=110, height=30, command=self._read_by_meter_id).grid(
-            row=2, column=2, padx=4, pady=6, sticky="w"
+        self.btn_read_meter = ctk.CTkButton(
+            top, text="Leer medidor", width=110, height=30, command=self._read_by_meter_id
         )
+        self.btn_read_meter.grid(row=2, column=2, padx=4, pady=6, sticky="w")
 
         ctk.CTkLabel(top, text="Índice:").grid(row=3, column=0, padx=8, pady=6, sticky="e")
         self.index_var = ctk.StringVar(value="0")
         ctk.CTkEntry(top, textvariable=self.index_var, width=60).grid(row=3, column=1, padx=4, pady=6, sticky="w")
-        ctk.CTkButton(top, text="Leer índice", width=110, height=30, command=self._read_by_index).grid(
-            row=3, column=2, padx=4, pady=6, sticky="w"
+        self.btn_read_idx = ctk.CTkButton(
+            top, text="Leer índice", width=110, height=30, command=self._read_by_index
+        )
+        self.btn_read_idx.grid(row=3, column=2, padx=4, pady=6, sticky="w")
+        self._maint_widgets.extend(
+            [self.btn_count, self.btn_scan, self.btn_read_meter, self.btn_read_idx]
         )
 
         self.progress_var = ctk.StringVar(value="")
@@ -691,6 +734,14 @@ class MetersTab(ctk.CTkFrame):
         ctk.CTkButton(actions, text="Cancelar escaneo", width=140, height=30, command=self._cancel_scan).pack(
             side="left"
         )
+
+    def set_maintenance_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for w in self._maint_widgets:
+            try:
+                w.configure(state=state)
+            except Exception:
+                pass
 
     def _clear_table(self) -> None:
         self._readings.clear()
@@ -731,6 +782,8 @@ class MetersTab(ctk.CTkFrame):
             self._append_row(reading)
 
     def _fetch_count(self) -> None:
+        if not self.app.guard_maintenance("Cantidad (O)"):
+            return
         if not self.app.client.is_connected:
             self.app._append_log("ERR", "Conecte primero al colector")
             return
@@ -745,6 +798,8 @@ class MetersTab(ctk.CTkFrame):
             self.app.meter_var.set(meter)
 
     def _read_by_meter_id(self) -> None:
+        if not self.app.guard_maintenance("Leer medidor"):
+            return
         if not self.app.client.is_connected:
             self.app._append_log("ERR", "Conecte primero al colector")
             return
@@ -788,7 +843,7 @@ class MetersTab(ctk.CTkFrame):
             )
 
         try:
-            self.app.command_queue.start(
+            self.app.queue_start(
                 [CMD_QUIT, QueuedCommand(cmd, wait_rx=True, rx_timeout_ms=12000, write_timeout_s=2.0)],
                 wait_rx=True,
                 on_step=on_step,
@@ -798,6 +853,8 @@ class MetersTab(ctk.CTkFrame):
             self.app._append_log("ERR", str(exc))
 
     def _read_by_index(self) -> None:
+        if not self.app.guard_maintenance("Leer índice"):
+            return
         if not self.app.client.is_connected:
             self.app._append_log("ERR", "Conecte primero al colector")
             return
@@ -840,7 +897,7 @@ class MetersTab(ctk.CTkFrame):
             )
 
         try:
-            self.app.command_queue.start(
+            self.app.queue_start(
                 [CMD_QUIT, QueuedCommand(cmd, wait_rx=True, rx_timeout_ms=12000, write_timeout_s=2.0)],
                 wait_rx=True,
                 on_step=on_step,
@@ -850,6 +907,8 @@ class MetersTab(ctk.CTkFrame):
             self.app._append_log("ERR", str(exc))
 
     def _scan_all(self) -> None:
+        if not self.app.guard_maintenance("Escanear"):
+            return
         if not self.app.client.is_connected:
             self.app._append_log("ERR", "Conecte primero al colector")
             return
@@ -900,7 +959,7 @@ class MetersTab(ctk.CTkFrame):
             else:
                 self.progress_var.set(f"Listo: {ok_reads[0]} lecturas")
 
-        self.app.command_queue.start(commands, on_step=on_step, on_done=on_done, wait_rx=True)
+        self.app.queue_start(commands, on_step=on_step, on_done=on_done, wait_rx=True)
 
     def _cancel_scan(self) -> None:
         if self.app.command_queue.is_busy:
@@ -914,6 +973,7 @@ class BulkLoadTab(ctk.CTkFrame):
         super().__init__(master, fg_color="transparent")
         self.app = app
         self._items: List[BulkAddLine] = []
+        self._maint_widgets: List[Any] = []
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(2, weight=1)
@@ -949,9 +1009,11 @@ class BulkLoadTab(ctk.CTkFrame):
         ctk.CTkButton(btn_row, text="Vista previa", width=110, height=30, command=self._preview).pack(
             side="left", padx=8
         )
-        ctk.CTkButton(btn_row, text="Ejecutar", width=100, height=30, command=self._execute).pack(
-            side="left", padx=8
+        self.btn_execute = ctk.CTkButton(
+            btn_row, text="Ejecutar", width=100, height=30, command=self._execute
         )
+        self.btn_execute.pack(side="left", padx=8)
+        self._maint_widgets.append(self.btn_execute)
 
         self.preview_box = ctk.CTkTextbox(self, font=ctk.CTkFont(family="Consolas", size=12))
         self.preview_box.grid(row=4, column=0, padx=12, pady=(4, 12), sticky="nsew")
@@ -961,6 +1023,14 @@ class BulkLoadTab(ctk.CTkFrame):
         ctk.CTkLabel(self, textvariable=self.status_var, text_color=("gray40", "gray60")).grid(
             row=5, column=0, padx=12, pady=(0, 12), sticky="w"
         )
+
+    def set_maintenance_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for w in self._maint_widgets:
+            try:
+                w.configure(state=state)
+            except Exception:
+                pass
 
     def _load_file(self) -> None:
         path = filedialog.askopenfilename(
@@ -992,6 +1062,8 @@ class BulkLoadTab(ctk.CTkFrame):
         self.preview_box.configure(state="disabled")
 
     def _execute(self) -> None:
+        if not self.app.guard_maintenance("Carga masiva"):
+            return
         if not self.app.client.is_connected:
             self.app._append_log("ERR", "Conecte primero al colector")
             return
@@ -1032,4 +1104,4 @@ class BulkLoadTab(ctk.CTkFrame):
             else:
                 self.status_var.set(f"Carga finalizada ({len(valid)} medidores)")
 
-        self.app.command_queue.start(queued, on_done=on_done, wait_rx=True)
+        self.app.queue_start(queued, on_done=on_done, wait_rx=True)

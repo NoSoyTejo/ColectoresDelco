@@ -6,9 +6,9 @@
   "stopbits": 1,
   "timeout": 1.0,
   "line_ending": "\r\n",
-  "last_meter": "R066000904987",
+  "last_meter": "",
   "last_header": "",
-  "connection_mode": "com",
-  "tcp_host": "10.118.163.46",
+  "connection_mode": "tcp",
+  "tcp_host": "10.118.169.112",
   "tcp_port": 9911
 }

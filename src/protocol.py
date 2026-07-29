@@ -530,24 +530,24 @@ def describe_status_response(raw: str, last_command: str = "") -> Optional[str]:
         if cmd_low == "o":
             return (
                 "O respondio NO: sin AMRsw/IDnum. "
-                "Si ya hubo UnLock y QUIT, el canal (TCP/gateway) puede no "
-                "exponer mantenimiento completo — pruebe el mismo O por COM. "
-                "Si no hubo UnLock: Login → QUIT → O (una vez)."
+                "Si ya hubo UnLock por TCP/IP, este puerto casi seguro no entrega "
+                "mantenimiento — Desconecte, cambie a COM y pulse Cantidad (O). "
+                "Si esta en COM y hubo UnLock: Login → QUIT → O (una vez)."
             )
         if cmd_low == "wake":
             return (
                 "WAKE respondio NO. Pare (no encadene ZOOM). "
-                "Un QUIT y luego boton QUIT→WAKE→ZOOM."
+                "Un QUIT y luego boton Forzar lecturas."
             )
         if cmd_low == "zoom":
             return (
                 "ZOOM respondio NO. Pare. "
-                "Un QUIT y luego boton QUIT→WAKE→ZOOM."
+                "Un QUIT y luego boton Forzar lecturas."
             )
         if cmd_low.startswith("k="):
             return (
                 "k=10100000 respondio NO (K rechazado por el firmware). Pare. "
-                "Para reiniciar lecturas use QUIT → WAKE → ZOOM (equivalente del manual). "
+                "Para reiniciar lecturas use Forzar lecturas (QUIT→WAKE→ZOOM). "
                 "No reenvie k= en bucle."
             )
         if cmd_low.startswith("a") or cmd_low.startswith("e") or cmd_low.startswith("sgxf"):
@@ -559,20 +559,20 @@ def describe_status_response(raw: str, last_command: str = "") -> Optional[str]:
             return "DEL respondio NO. No reintente en bucle; verifique QUIT/Login."
         if cmd_low == "ver":
             return (
-                "VER respondio NO. Si ya hubo UnLock, no reintente en bucle: "
-                "pruebe fin de linea CR (solo \\r) o el mismo VER por COM."
+                "VER respondio NO. "
+                "Por TCP/IP suele fallar aunque UnLock OK — use COM para ver la version. "
+                "En COM: Login + QUIT y VER una vez (o fin de linea CR)."
             )
         if cmd_low.startswith("c") and len(cmd) == 13:
             return (
                 "C… respondio NO: reloj no actualizado. "
-                "Si UnLock ya OK y O/VER tambien dan NO, el canal TCP "
-                "probablemente no soporta mantenimiento — pruebe por COM."
+                "Por TCP suele fallar; pruebe Sync por COM tras UnLock."
             )
         if cmd_low.startswith("r"):
             return (
                 f"{cmd!r} respondio NO: sin lectura. "
-                "Si UnLock ya OK y O tambien da NO, compare por COM. "
-                "Si O funciona: Login → QUIT → lectura (una vez)."
+                "Por TCP/IP las lecturas suelen dar NO — use COM + Escanear / Leer medidor. "
+                "En COM: el medidor debe existir en el colector (copie el nº del escaneo)."
             )
         if cmd:
             return (
