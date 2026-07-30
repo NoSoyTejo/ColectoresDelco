@@ -29,6 +29,7 @@ from protocol import (
     CMD_QUIT,
     CMD_WAKE,
     CMD_ZOOM,
+    MeterReading,
     READ_FLAGS_MULTITARIFF,
     cmd_download_polling,
     cmd_multitariff_read,
@@ -42,6 +43,7 @@ from protocol import (
     parse_collector_info,
     parse_meter_reading,
 )
+from meters_export import export_meters_xlsx
 
 if TYPE_CHECKING:
     from ui.app_window import AppWindow
@@ -648,7 +650,7 @@ class MetersTab(ctk.CTkFrame):
     def __init__(self, master: ctk.CTkBaseClass, app: AppWindow) -> None:
         super().__init__(master, fg_color="transparent")
         self.app = app
-        self._readings: List[str] = []
+        self._readings: List[MeterReading] = []
         self._scan_index = 0
         self._scan_total = 0
         self._scan_active = False
@@ -732,8 +734,17 @@ class MetersTab(ctk.CTkFrame):
             side="left", padx=(0, 8)
         )
         ctk.CTkButton(actions, text="Cancelar escaneo", width=140, height=30, command=self._cancel_scan).pack(
-            side="left"
+            side="left", padx=(0, 8)
         )
+        ctk.CTkButton(
+            actions,
+            text="Exportar Excel",
+            width=130,
+            height=30,
+            command=self._export_excel,
+            fg_color=("#2B7A4B", "#1E5A35"),
+            hover_color=("#236B40", "#174A2B"),
+        ).pack(side="left")
 
     def set_maintenance_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
@@ -759,9 +770,10 @@ class MetersTab(ctk.CTkFrame):
         return f"{val:>10.2f}" if val is not None else f"{'—':>10}"
 
     def _append_row(self, reading) -> None:
+        self._readings.append(reading)
         line = (
             f"{reading.meter_id:<14} {self._fmt(reading.t1)} {self._fmt(reading.t2)} "
-            f"{self._fmt(reading.t3)} {self._fmt(reading.t4)} {self._fmt(reading.total)} "
+            f"{self._fmt(reading.t3)} {self._fmt(reading.t4)} {self._fmt(reading.display_total)} "
             f"{reading.datetime_text:<20}\n"
         )
         self.table.configure(state="normal")
@@ -769,6 +781,34 @@ class MetersTab(ctk.CTkFrame):
         self.table.see("end")
         self.table.configure(state="disabled")
         self.app._append_log("INFO", format_meter_reading_summary(reading))
+
+    def _export_excel(self) -> None:
+        if not self._readings:
+            self.app._append_log("ERR", "No hay lecturas para exportar. Escanee o lea medidores primero.")
+            return
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"medidores_{stamp}.xlsx"
+        path = filedialog.asksaveasfilename(
+            title="Exportar medidores a Excel",
+            defaultextension=".xlsx",
+            initialfile=default_name,
+            filetypes=[("Excel", "*.xlsx"), ("Todos", "*.*")],
+        )
+        if not path:
+            return
+        source = self.app._connection_status_text() if hasattr(self.app, "_connection_status_text") else ""
+        count_txt = self.count_var.get()
+        try:
+            out = export_meters_xlsx(
+                path,
+                self._readings,
+                source=source,
+                collector_count=count_txt,
+            )
+            self.progress_var.set(f"Excel exportado: {len(self._readings)} filas")
+            self.app._append_log("INFO", f"Excel guardado: {out}")
+        except Exception as exc:
+            self.app._append_log("ERR", f"No se pudo exportar Excel: {exc}")
 
     def on_collector_info(self, raw: str) -> None:
         info = parse_collector_info(raw)

@@ -252,6 +252,21 @@ class MeterReading:
     display_on: Optional[bool]
     raw: str
 
+    @property
+    def display_total(self) -> Optional[float]:
+        """
+        Total para UI/export: usa F19 si viene con valor; si F19 es 0/vacío
+        (mono-tarifa típica), suma T1–T4 para no mostrar 0.00 engañoso.
+        """
+        if self.total is not None and abs(self.total) > 1e-9:
+            return self.total
+        tariffs = [v for v in (self.t1, self.t2, self.t3, self.t4) if v is not None]
+        if tariffs:
+            summed = sum(tariffs)
+            if abs(summed) > 1e-9 or self.total is None:
+                return summed
+        return self.total
+
 
 @dataclass
 class CollectorInfo:
@@ -404,8 +419,9 @@ def format_meter_reading_summary(reading: MeterReading) -> str:
         parts.append(f"T3={reading.t3}")
     if reading.t4 is not None:
         parts.append(f"T4={reading.t4}")
-    if reading.total is not None:
-        parts.append(f"Total={reading.total}")
+    shown = reading.display_total
+    if shown is not None:
+        parts.append(f"Total={shown}")
     if reading.datetime_text:
         parts.append(f"Fecha={reading.datetime_text}")
     return " | ".join(parts)

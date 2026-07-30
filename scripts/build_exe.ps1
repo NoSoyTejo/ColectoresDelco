@@ -21,6 +21,8 @@ if (-not (Test-Path $VenvPy)) {
     --hidden-import tcp_client `
     --hidden-import polling_schedule `
     --hidden-import command_queue `
+    --hidden-import meters_export `
+    --hidden-import openpyxl `
     (Join-Path $Root "src\main.py")
 
 Write-Host ""
